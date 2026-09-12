@@ -7,25 +7,31 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–2 of PROJECT.md's build order are done. No discover / enrich /
-compose / send logic exists yet. What's real:
+Steps 1–3 of PROJECT.md's build order are done. No enrich / compose /
+send logic exists yet. What's real:
 
-- `src/leadgen/{discover,enrich,compose,send,api}` — still empty
-  packages, right structure, no logic.
+- `src/leadgen/{enrich,compose,send,api}` — still empty packages, right
+  structure, no logic.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
 - `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
   loader for target profiles, business types, and offers, with real
   example files under `config/` and `targets/`.
+- `src/leadgen/discover/{geocode,overpass}.py` — Nominatim geocoding
+  (cached, rate-limited) and an Overpass query builder/runner/parser
+  covering all four location modes. Returns plain `DiscoveredBusiness`
+  dataclasses — does **not** write to the `businesses` table yet; that
+  upsert logic doesn't exist until there's an actual orchestration
+  entry point calling this.
 - Postgres 16 + Redis via docker-compose, Alembic wired up.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next per PROJECT.md's build order: the Overpass discoverer (step 3).
-Don't skip ahead to send-side work before discover and enrich have been
-run against real data and someone has read 200 rows by hand (step 5) —
-that's the checkpoint that decides whether the second half is worth
-building at all.
+Next per PROJECT.md's build order: the site crawler (step 4, → contacts
++ signals). Don't skip ahead to send-side work before discover and
+enrich have been run against real data and someone has read 200 rows by
+hand (step 5) — that's the checkpoint that decides whether the second
+half is worth building at all.
 
 ## Commands
 
