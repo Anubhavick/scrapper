@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env / uv
+.venv/
+.uv-cache/
+
+# Env / secrets
+.env
+*.pem
+*.key
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docker volumes are named, not bind-mounted, so nothing local to ignore there
+
+# Crawl / data artifacts
+*.log
