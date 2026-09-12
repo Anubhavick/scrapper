@@ -7,10 +7,10 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–3 of PROJECT.md's build order are done. No enrich / compose /
-send logic exists yet. What's real:
+Steps 1–4 of PROJECT.md's build order are done. No compose / send logic
+exists yet. What's real:
 
-- `src/leadgen/{enrich,compose,send,api}` — still empty packages, right
+- `src/leadgen/{compose,send,api}` — still empty packages, right
   structure, no logic.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
@@ -23,15 +23,25 @@ send logic exists yet. What's real:
   dataclasses — does **not** write to the `businesses` table yet; that
   upsert logic doesn't exist until there's an actual orchestration
   entry point calling this.
+- `src/leadgen/enrich/{robots,signals,crawler}.py` — robots.txt-aware,
+  rate-limited crawling of a business's own pages; extracts contact
+  emails (never guessed) and the 8 enrichment signals from PROJECT.md's
+  example list. Also returns plain dataclasses, no DB writes yet.
 - Postgres 16 + Redis via docker-compose, Alembic wired up.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
+- **Known environment gap:** live network calls to Overpass/Nominatim
+  hang indefinitely in the sandbox this was built in (see docs/03's
+  Verification section) — the mocked test suite is solid, but nobody
+  has confirmed this code reaches the real APIs from wherever it
+  actually runs. Check that before trusting discover/enrich against
+  production data.
 
-Next per PROJECT.md's build order: the site crawler (step 4, → contacts
-+ signals). Don't skip ahead to send-side work before discover and
-enrich have been run against real data and someone has read 200 rows by
-hand (step 5) — that's the checkpoint that decides whether the second
-half is worth building at all.
+Next per PROJECT.md's build order: CSV export (step 5), then **read 200
+rows by hand before building anything past this point** — that's the
+checkpoint that decides whether the second half (send-side work) is
+worth building at all. Don't skip ahead to Gmail/send just because it's
+more interesting to build.
 
 ## Commands
 

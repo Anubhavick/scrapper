@@ -8,20 +8,46 @@ a mandatory human-approval step and permanent suppression tracking.
 
 Full spec, data model, and legal posture: [PROJECT.md](PROJECT.md).
 Notes for anyone (human or Claude) working in this codebase:
-[CLAUDE.md](CLAUDE.md).
+[CLAUDE.md](CLAUDE.md). A running build log, one file per completed
+step with the reasoning behind every non-obvious decision: [docs/](docs/).
 
-## Status: skeleton
+## Status: build order steps 1–4 done, out of 9
 
-This repo currently has the schema, the project structure, and one
-utility function — **no discovery, crawling, drafting, or sending logic
-exists yet.** Nothing in this README's "how it will work" sections below
-is runnable today. What *is* here and working:
+**Discover and enrich are real and tested. Compose and send are not
+built yet.** So today you can point this at a target profile and get
+back businesses + their contact emails + enrichment signals — but
+nothing drafts a message, and nothing sends. Per PROJECT.md's build
+order, that's deliberate: steps 1–5 (skeleton → discover → enrich → CSV
+export → read 200 rows by hand) are designed to prove the data is worth
+acting on *before* the sending half gets built at all.
 
-- Postgres 16 + Redis, via Docker Compose
-- The full database schema (10 tables), migrated with Alembic
-- `normalise_domain()` — the domain-dedup function everything else will
-  depend on — with a passing test suite
-- Empty, correctly-structured packages for every pipeline stage
+What's done:
+
+- Postgres 16 + Redis via Docker Compose; full schema (10 tables),
+  migrated with Alembic
+- `normalise_domain()` — the domain-dedup function everything else
+  depends on
+- A Pydantic-validated config loader for target profiles, business
+  types, and offers — bad YAML fails loudly with a file path, not a
+  stack trace
+- **Discover**: Nominatim geocoding (cached, rate-limited) + an Overpass
+  query builder/runner/parser covering all four location modes
+  (`radius`/`bbox`/`city`/`admin_area`) — no API key needed
+- **Enrich**: a robots.txt-respecting, rate-limited crawler for a
+  business's own pages, extracting contact emails (never guessed) and
+  the 8 enrichment signals from PROJECT.md's example list
+- 93 passing tests, all against mocked HTTP or static fixtures — no
+  real network calls in the test suite
+
+What's not done: qualification-rule application, CSV export, compose,
+send, monitor, the API/review UI, and the actual database-persistence
+wiring for discover/enrich (they currently return plain Python objects,
+not rows in `businesses`/`contacts`/`enrichment_signals` — that's an
+orchestration layer that doesn't exist yet). See [docs/](docs/) for the
+step-by-step detail, including one open item: live network calls to
+Overpass/Nominatim haven't been confirmed reachable from every
+environment this was built in — check that before trusting real data
+from a new machine (docs/03's Verification section has the specifics).
 
 ## Setup
 
@@ -78,35 +104,44 @@ target profile (YAML)
 [7] MONITOR   ──► replies / bounces / unsubscribes → permanent suppression
 ```
 
-### How scraping (discover + enrich) will work
+### How scraping (discover + enrich) works — built and tested
 
-- **Discover** resolves the profile's `location` (a place name, via
-  Nominatim, cached to disk) into a bounding box or radius, then queries
-  OpenStreetMap's Overpass API for businesses matching the profile's
-  `business_type` — no API key needed. Google Places is a configured
-  fallback, used only to fill gaps, because Places content can't be
-  persisted beyond 30 days per its ToS (OSM's ODbL has no such limit,
-  which is why Overpass is primary).
-- **Enrich** crawls a small, profile-specified set of pages on each
-  business's *own* website (`/`, `/contact`, `/about`, …) — never a
-  third party — respecting `robots.txt`, at 1 request/second per host,
-  with a real User-Agent that includes a contact URL. It extracts:
+- **Discover** (`src/leadgen/discover/`) resolves the profile's
+  `location` (a place name, via Nominatim, cached to disk) into a
+  bounding box or radius, then queries OpenStreetMap's Overpass API for
+  businesses matching the profile's `business_type` — no API key
+  needed. Google Places is a configured fallback, used only to fill
+  gaps, because Places content can't be persisted beyond 30 days per
+  its ToS (OSM's ODbL has no such limit, which is why Overpass is
+  primary — the Places fallback itself isn't implemented yet).
+- **Enrich** (`src/leadgen/enrich/`) crawls a small, profile-specified
+  set of pages on each business's *own* website (`/`, `/contact`,
+  `/about`, …) — never a third party — respecting `robots.txt`, at 1
+  request/second per host, with a real User-Agent that includes a
+  contact URL. It extracts:
   - contact emails (only ones actually present on the site — **no
     guessing, no `firstname@domain` permutation, no SMTP probing**)
   - factual signals the profile asks for (no HTTPS, no mobile viewport,
     no booking widget, site platform, last-updated year, page weight,
     WhatsApp link presence, etc.)
-- A business only becomes a **sendable lead** if it passes the profile's
-  `qualification` rules (has an email, has at least N of the requested
-  signals).
-- Raw HTML is cached (`crawl_cache`) so re-running discover/enrich during
-  development never re-crawls a page that's still fresh.
+- Both currently return plain Python objects (`DiscoveredBusiness`,
+  `CrawlResult`) rather than writing to the database — there's no
+  orchestration entry point yet that upserts them into
+  `businesses`/`contacts`/`enrichment_signals`, and no CLI to run them
+  against a target profile end-to-end. That wiring, plus **qualifying**
+  a business into a sendable lead (checking the profile's
+  `qualification` rules — has an email, has at least N of the requested
+  signals) and CSV export, are next (steps 5 in the build order).
+- Raw HTML caching (`crawl_cache`, so re-running discover/enrich during
+  development never re-crawls a page that's still fresh) is designed
+  into the schema but not wired up yet either — it depends on the same
+  persistence layer.
 
-None of this exists yet. Build order (from PROJECT.md): config loader →
-Overpass discoverer → site crawler → CSV export → **read 200 rows by
-hand before building anything past this point** — the point is to find
-out whether the data is good enough to justify building the sending
-half at all.
+Per PROJECT.md's build order: config loader → Overpass discoverer →
+site crawler (all three done) → CSV export → **read 200 rows by hand
+before building anything past this point** — the point is to find out
+whether the data is good enough to justify building the sending half at
+all.
 
 ### How sending automation will work
 
@@ -137,14 +172,17 @@ after discover/enrich/qualify have proven the data is worth acting on.
 
 ```
 src/leadgen/
-  config/    target profiles, business types, offers  (not yet implemented)
-  discover/  Overpass / Places / CSV business discovery (not yet implemented)
-  enrich/    site crawler → contacts + signals          (not yet implemented)
+  config/    target profiles, business types, offers  (implemented)
+  discover/  Overpass geocoding + query/parse           (implemented; Places/CSV not yet)
+  enrich/    site crawler → contacts + signals          (implemented)
   compose/   template + generated line → draft messages (not yet implemented)
   send/      Gmail OAuth, send queue, caps, suppression (not yet implemented)
   db/        SQLAlchemy models (implemented)
   api/       FastAPI + review UI                        (not yet implemented)
   util/      normalise_domain() and friends (implemented)
 alembic/     migrations
+config/      business_types.yaml, offers/*.yaml (example data)
+targets/     target profile YAML files (example data)
+docs/        one file per completed build-order step
 tests/
 ```

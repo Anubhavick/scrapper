@@ -14,3 +14,5 @@ those two files distill from.
 |---|---|---|
 | 1 | Skeleton: pyproject, docker-compose, Alembic, db schema, `normalise_domain()` | [01-skeleton-and-schema.md](01-skeleton-and-schema.md) |
 | 2 | Config loader: target profiles, business types, offers | [02-config-loader.md](02-config-loader.md) |
+| 3 | Overpass discoverer: Nominatim geocoding + Overpass query/parse | [03-overpass-discoverer.md](03-overpass-discoverer.md) |
+| 4 | Site crawler: robots.txt, contact emails, enrichment signals | [04-site-crawler.md](04-site-crawler.md) |

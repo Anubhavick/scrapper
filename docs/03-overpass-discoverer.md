@@ -56,6 +56,18 @@ Build order step 3: "no API key needed — testable immediately."
 
 - `uv run pytest`: 66/66 passing (50 from steps 1–2, 16 new), all
   against mocked HTTP.
-- Live smoke test against the real Overpass + Nominatim APIs, using the
-  actual `targets/dentists-gurugram.yaml` profile capped to
-  `max_results: 5` for the run: **[filled in after the run completes]**
+- Attempted a live smoke test against the real Overpass + Nominatim
+  APIs using `targets/dentists-gurugram.yaml`, two attempts (a 15km
+  radius, then a 2km radius with a 25s client timeout) — both hung
+  indefinitely with zero output rather than completing or raising a
+  timeout error, and were killed after 18 and ~5 minutes respectively.
+  This points at something in the current sandbox/network blocking or
+  silently dropping traffic to these specific hosts, not a code defect:
+  the exact same `build_query` → `run_query` → `parse_elements` path is
+  exercised end-to-end by `test_discover_end_to_end` against mocked
+  HTTP and passes, and generic large HTTPS downloads (e.g. GitHub
+  release assets, in step 1's setup) did complete on this same network,
+  just slowly. Re-run the smoke test script from a normal machine
+  before trusting this code against production data for the first
+  time — don't take "the mocked tests pass" as proof the real Overpass
+  API is reachable from wherever this actually deploys.
