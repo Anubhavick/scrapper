@@ -1,0 +1,41 @@
+name: dentists-austin-tx
+enabled: true
+
+business_type: dentist
+
+location:
+  mode: radius
+  center: "Austin, Texas, USA"
+  radius_km: 3
+
+source:
+  primary: overpass
+  max_results: 500
+
+filters:
+  must_have_website: true
+  must_have_phone: false
+  min_name_length: 3
+
+enrichment:
+  crawl_pages: [/, /contact, /about, /services]
+  max_pages: 6
+  signals:
+    - no_https
+    - no_mobile_viewport
+    - no_contact_form
+    - no_online_booking
+    - site_platform
+    - last_content_year
+    - page_weight_mb
+    - has_whatsapp_link
+
+qualification:
+  require_email: true
+  require_any_signal: [no_online_booking, no_contact_form]
+  min_signal_count: 1
+
+outreach:
+  offer_id: appointment-automation
+  sender_pool: [sales1]
+  daily_cap_per_mailbox: 40

@@ -29,3 +29,5 @@ htmlcov/
 
 # Crawl / data artifacts
 *.log
+.cache/
+leads*.csv

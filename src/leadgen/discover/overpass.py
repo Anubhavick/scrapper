@@ -8,6 +8,7 @@ first.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -110,15 +111,47 @@ def build_query(
     )
 
 
-def run_query(query: str, client: httpx.Client) -> list[dict]:
+TRANSIENT_STATUS_CODES = {429, 502, 503, 504}
+RETRY_BACKOFF_SECONDS = (2.0, 4.0)
+
+
+def run_query(
+    query: str, client: httpx.Client, user_agent: str, max_attempts: int = 3
+) -> list[dict]:
     """Execute an Overpass QL query. Caller owns the client's lifecycle
-    so tests can inject an httpx.MockTransport-backed client."""
-    try:
-        response = client.post(OVERPASS_URL, data={"data": query})
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise OverpassError(f"Overpass request failed: {exc}") from exc
-    return response.json().get("elements", [])
+    so tests can inject an httpx.MockTransport-backed client.
+
+    A real, identifying User-Agent is required here for the same reason
+    as Nominatim (see geocode.py) -- overpass-api.de returns 406 Not
+    Acceptable for requests carrying only a generic library User-Agent
+    like httpx's default, which every mocked test missed since none of
+    them inspect request headers.
+
+    A live run against the public overpass-api.de instance also showed
+    intermittent 504s on a query that succeeded seconds later with
+    identical parameters and a healthy rate-limit slot -- their shared
+    public instance is documented to be flaky under load, independent of
+    query cost. Retrying a couple of times with a short backoff is
+    standard practice against this API and isn't papering over a bug in
+    our own query."""
+    last_error: OverpassError | None = None
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            time.sleep(RETRY_BACKOFF_SECONDS[attempt - 1])
+        try:
+            response = client.post(
+                OVERPASS_URL, data={"data": query}, headers={"User-Agent": user_agent}
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            last_error = OverpassError(f"Overpass request failed: {exc}")
+            if exc.response.status_code in TRANSIENT_STATUS_CODES and attempt < max_attempts - 1:
+                continue
+            raise last_error from exc
+        except httpx.HTTPError as exc:
+            raise OverpassError(f"Overpass request failed: {exc}") from exc
+        return response.json().get("elements", [])
+    raise last_error  # pragma: no cover - unreachable, loop always returns or raises
 
 
 def parse_elements(
@@ -173,10 +206,11 @@ def discover(
     profile: TargetProfile,
     business_type: BusinessTypeDef,
     client: httpx.Client,
+    user_agent: str,
     geocoder: NominatimClient | None = None,
 ) -> list[DiscoveredBusiness]:
     """End-to-end: build the query, run it, parse the results, capped
     at the profile's source.max_results."""
     query = build_query(profile, business_type, geocoder)
-    elements = run_query(query, client)
+    elements = run_query(query, client, user_agent)
     return parse_elements(elements, profile.source.max_results)

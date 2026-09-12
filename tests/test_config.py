@@ -43,9 +43,8 @@ def test_load_target_profiles_real_dir() -> None:
     business_types = load_business_types(BUSINESS_TYPES_PATH)
     offers = load_offers(OFFERS_DIR)
     profiles = load_target_profiles(TARGETS_DIR, business_types, offers)
-    assert len(profiles) == 1
-    profile = profiles[0]
-    assert profile.name == "dentists-gurugram"
+    assert len(profiles) == 2
+    profile = next(p for p in profiles if p.name == "dentists-gurugram")
     assert profile.location.mode == "radius"
     assert profile.location.radius_km == 15
     assert profile.outreach.offer_id == "appointment-automation"

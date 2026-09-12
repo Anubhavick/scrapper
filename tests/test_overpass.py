@@ -175,17 +175,57 @@ def test_run_query_returns_elements() -> None:
         return httpx.Response(200, json=OVERPASS_ELEMENTS)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    elements = run_query("fake query", client)
+    elements = run_query("fake query", client, user_agent="test-bot/1.0")
     assert len(elements) == 4
 
 
+def test_run_query_sends_identifying_user_agent() -> None:
+    # overpass-api.de returns 406 for requests without a real User-Agent
+    # (a generic httpx default gets rejected) -- this was missed until a
+    # live run against the real API surfaced it, since no mocked test
+    # checked headers before.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["User-Agent"] == "test-bot/1.0 (+contact: me@example.com)"
+        return httpx.Response(200, json=OVERPASS_ELEMENTS)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    run_query("fake query", client, user_agent="test-bot/1.0 (+contact: me@example.com)")
+
+
 def test_run_query_http_error_raises_overpass_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Bad Request")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(OverpassError, match="Overpass request failed"):
+        run_query("fake query", client, user_agent="test-bot/1.0")
+
+
+def test_run_query_retries_transient_errors_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            return httpx.Response(504, text="Gateway Timeout")
+        return httpx.Response(200, json=OVERPASS_ELEMENTS)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    elements = run_query("fake query", client, user_agent="test-bot/1.0")
+    assert attempts["count"] == 3
+    assert len(elements) == 4
+
+
+def test_run_query_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(504, text="Gateway Timeout")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     with pytest.raises(OverpassError, match="Overpass request failed"):
-        run_query("fake query", client)
+        run_query("fake query", client, user_agent="test-bot/1.0", max_attempts=3)
 
 
 def test_discover_end_to_end(tmp_path: Path) -> None:
@@ -194,6 +234,6 @@ def test_discover_end_to_end(tmp_path: Path) -> None:
 
     profile = _profile(tmp_path)
     overpass_client = httpx.Client(transport=httpx.MockTransport(overpass_handler))
-    results = discover(profile, DENTIST, overpass_client, _geocoder(tmp_path))
+    results = discover(profile, DENTIST, overpass_client, "test-bot/1.0", _geocoder(tmp_path))
     assert len(results) == 2
     assert results[0].name == "Smile Dental Clinic"

@@ -67,7 +67,33 @@ Build order step 3: "no API key needed — testable immediately."
   exercised end-to-end by `test_discover_end_to_end` against mocked
   HTTP and passes, and generic large HTTPS downloads (e.g. GitHub
   release assets, in step 1's setup) did complete on this same network,
-  just slowly. Re-run the smoke test script from a normal machine
-  before trusting this code against production data for the first
-  time — don't take "the mocked tests pass" as proof the real Overpass
-  API is reachable from wherever this actually deploys.
+  just slowly.
+
+### Update: live reachability confirmed (later session, different network)
+
+Re-run from a normal machine (not the original build sandbox) against
+`targets/dentists-austin-tx.yaml` (Austin, TX, USA, 3km radius) via
+`scripts/run_pipeline.py`. Overpass and Nominatim are both reachable —
+the original hang was specific to that sandbox's network, not this
+code. Two real bugs surfaced in the process, both fixed:
+
+1. **`run_query()` sent no User-Agent header at all.** overpass-api.de
+   returns `406 Not Acceptable` without one, same policy as Nominatim
+   (geocode.py already handled this correctly; overpass.py didn't).
+   Every mocked test passed anyway because none of them inspect request
+   headers. Fixed by threading `user_agent` through `discover()` →
+   `run_query()`, same pattern as the crawler and geocoder.
+2. **overpass-api.de's shared public instance is flaky under load** —
+   an identical query, with a healthy rate-limit slot, returned `504
+   Gateway Timeout` on one attempt and `200 OK` seconds later. Not a
+   query-cost problem (confirmed by replaying the exact generated query
+   manually via `curl`). Added retry-with-backoff (3 attempts) in
+   `run_query()` — standard practice against this specific API, not a
+   workaround for a defect in our query.
+
+End-to-end result: 6 real businesses found near downtown Austin, 2
+qualified, real emails and real crawl signals (WordPress/Shopify
+detection, page weight, content year) extracted from their actual
+websites. See [docs/05](05-csv-export-and-qualification.md) for what
+this means for the "read 200 rows by hand" checkpoint, and
+[HOWTO.md](../HOWTO.md) for the exact commands (`scripts/run_pipeline.py`).
