@@ -11,17 +11,26 @@ Notes for anyone (human or Claude) working in this codebase:
 [CLAUDE.md](CLAUDE.md). A running build log, one file per completed
 step with the reasoning behind every non-obvious decision: [docs/](docs/).
 
-## Status: build order steps 1–5 done, out of 9
+## Status: build order steps 1–6 done, out of 9
 
-**Discover → enrich → CSV export is a real, runnable pipeline now.
-Compose and send are not built yet.** So today you can point this at a
-target profile and get back a CSV of businesses, their contact emails,
-enrichment signals, and a qualified yes/no — but nothing drafts a
-message, and nothing sends. Per PROJECT.md's build order, that's
-deliberate: steps 1–5 exist specifically to prove the data is worth
-acting on *before* the sending half gets built at all — and step 5's
-CSV is meant to be read by a human, 200 rows at a time, before anything
-past this point gets built.
+**Discover → enrich → CSV export is a real, runnable pipeline (steps
+1–5). Step 6 added the Gmail OAuth flow, message composition, and the
+send-queue decision logic (daily caps + suppression) — but nothing
+calls any of it end-to-end yet, and there are no real Google API
+credentials to call it with.** So today you can point this at a target
+profile and get back a CSV of businesses, their contact emails,
+enrichment signals, and a qualified yes/no — and separately, the pieces
+that *would* send an email (encryption, OAuth, MIME building, cap +
+suppression checks) exist and are tested, but nothing wires them
+together into an actual send yet.
+
+**Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
+hard gate — read 200 rows by hand *before* building anything past it,
+specifically to confirm the data justifies building the sending half at
+all. That hand-review hasn't happened yet (no confirmed live run against
+real Overpass/Nominatim data — see below). Step 6 was built ahead of
+that review anyway; see [docs/06](docs/06-gmail-oauth-and-send-queue.md)
+for why that's flagged rather than quietly done.
 
 What's done:
 
@@ -43,18 +52,36 @@ What's done:
 - **Pipeline**: `leadgen.pipeline.run_target_profile()` wires all of the
   above together end-to-end and `export_csv()` writes the result — see
   "Running it" below
-- 109 passing tests, all against mocked HTTP or static fixtures — no
-  real network calls in the test suite
+- **Compose**: `leadgen.compose.render.render_message()` fills an offer's
+  subject/body template with one generated line grounded in a real
+  boolean signal (e.g. "no online booking found")
+- **Send building blocks**: `leadgen.send.{crypto,oauth,gmail,caps,
+  suppression,queue}` — refresh-token encryption, the Gmail OAuth
+  authorization-code flow (`gmail.send` scope only), MIME message
+  building + the actual Gmail API send call, and the pure decision logic
+  for the 50/day cap, suppression checks, and the 90–600s randomised gap
+  between sends. **Nothing orchestrates these into an actual send loop
+  yet** — see [docs/06](docs/06-gmail-oauth-and-send-queue.md).
+- 137 passing tests, all against mocked HTTP, pure functions, or static
+  fixtures — no real network calls, no real database, in the test suite
 
-What's not done, and two things worth knowing before trusting this
-against real data:
+What's not done, and things worth knowing before trusting this against
+real data or a real send:
 
-- Compose, send, monitor, and the API/review UI don't exist yet.
-- **No database persistence anywhere.** Discover/enrich/pipeline all
-  return plain Python objects and write a CSV directly — nothing
-  upserts into `businesses`/`contacts`/`enrichment_signals`/
-  `crawl_cache` yet. The schema is migrated and ready; the write path
-  just hasn't been built, because step 5 doesn't need it.
+- No orchestration ties compose/send into an actual send loop; no
+  campaign/message creation from a CSV; no review/approval UI (so the
+  hard rule "no send without human approval" has nothing to click yet);
+  monitor (bounce/reply handling) doesn't exist. The API/review UI don't
+  exist yet either.
+- **No database persistence for discover/enrich/pipeline.** They still
+  return plain Python objects and write a CSV directly — nothing upserts
+  into `businesses`/`contacts`/`enrichment_signals`/`crawl_cache` yet.
+  Step 6 did add `leadgen.db.session`/`leadgen.db.repository` for the two
+  queries the send caps/suppression logic needs (`count_sent_today`,
+  `fetch_suppressions`), but those are **untested against a real
+  Postgres** — `db/models.py`'s JSONB/UUID columns aren't SQLite-
+  compatible, so run `docker compose up -d` + `alembic upgrade head`
+  before trusting them.
 - **Qualification has a documented gap.** `require_any_signal` entries
   that aren't booleans (`last_content_year`, `page_weight_mb`) count as
   "matched" whenever the crawler found *any* value — not when that
@@ -199,30 +226,48 @@ before building anything past this point** — the point is to find out
 whether the data is good enough to justify building the sending half at
 all. That hand-review is a human task now, not a build step.
 
-### How sending automation will work
+### How sending automation works — building blocks done, not wired up yet
 
 - Each **mailbox** (a team member's own Gmail account) authenticates via
-  OAuth; the refresh token is stored encrypted, never in git or logs.
+  OAuth (`leadgen.send.oauth`, `gmail.send` scope only); the refresh
+  token is stored encrypted (`leadgen.send.crypto.TokenCipher`), never in
+  git or logs.
 - A **campaign** pairs a completed target run with an offer (the pitch,
-  also YAML — `config/offers/*.yaml`) and a pool of sender mailboxes.
-- **Compose** renders a subject + one generated line per lead from the
-  offer's template, grounded in that business's actual signals — no
-  message is sent without a human clicking approve on the exact
-  rendered text first.
-- **Send** enforces, in code, not config:
-  - max 50 emails per mailbox per day
+  also YAML — `config/offers/*.yaml`) and a pool of sender mailboxes —
+  the DB tables exist and are migrated, but nothing yet creates these
+  rows from a CSV of qualified leads.
+- **Compose** (`leadgen.compose.render.render_message()`) renders a
+  subject + one generated line per lead from the offer's template,
+  grounded in that business's actual signals — no message is sent
+  without a human clicking approve on the exact rendered text first
+  (there's no UI to click yet — see below).
+- **Send** enforces, in code, not config, via `leadgen.send.queue` +
+  `leadgen.send.gmail`:
+  - max 50 emails per mailbox per day (`send.caps.can_send()`)
   - randomised 90–600 second gaps between sends, no bursts
+    (`send.queue.wait_before_next_send()`)
   - a suppression check (email *or* domain) before every single send —
     unsubscribes are permanent and global across every campaign, forever
+    (`send.suppression.is_suppressed()`)
+  - all three enforced together by `send.queue.check_sendable()`, which
+    raises `SendBlocked` with a reason instead of silently skipping
 - **Monitor** watches for bounces, replies, and unsubscribes via the
-  Gmail API and writes to the suppression list automatically.
+  Gmail API and writes to the suppression list automatically — not
+  built; needs the restricted `gmail.readonly`/`gmail.modify` scopes and
+  a CASA security assessment, unlike the `gmail.send`-only scope used so
+  far.
 - The target country is a config flag, because what's legally permitted
   differs — see PROJECT.md's legal posture table (CAN-SPAM / GDPR /
   DPDP). Default posture is the strictest of the three. **This is not
   legal advice — verify before the first real send.**
 
-Also none of this exists yet — it's steps 6–7 of the build order, well
-after discover/enrich/qualify have proven the data is worth acting on.
+**What's missing to actually send anything**: real Google OAuth client
+credentials and a `TOKEN_ENCRYPTION_KEY` (see the API keys section once
+it's written up), an orchestration loop that reads `messages` rows and
+calls the pieces above in order, campaign/message creation from a CSV,
+and the review/approval UI (step 8) for the human-approval hard rule.
+See [docs/06](docs/06-gmail-oauth-and-send-queue.md) for the full list
+and why this was built ahead of the "read 200 rows by hand" checkpoint.
 
 ## Project layout
 
@@ -232,9 +277,11 @@ src/leadgen/
   discover/   Overpass geocoding + query/parse + filters (implemented; Places/CSV not yet)
   enrich/     site crawler → contacts + signals + qualify (implemented)
   pipeline.py discover → filter → crawl → qualify → CSV  (implemented)
-  compose/    template + generated line → draft messages (not yet implemented)
-  send/       Gmail OAuth, send queue, caps, suppression (not yet implemented)
-  db/         SQLAlchemy models (implemented; nothing writes to it yet)
+  compose/    template + generated line → draft messages (implemented)
+  send/       Gmail OAuth, MIME+send, caps, suppression, queue decision logic
+              (implemented; nothing orchestrates these into a send loop yet)
+  db/         SQLAlchemy models (implemented); session + the two send-side
+              queries (implemented, untested against a real Postgres)
   api/        FastAPI + review UI                        (not yet implemented)
   util/       normalise_domain() and friends (implemented)
 alembic/      migrations

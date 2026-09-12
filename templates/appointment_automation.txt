@@ -1,0 +1,9 @@
+Hi,
+
+{generated_line} for {business_name} — that usually means a missed call turns into a lost booking instead of a paying customer.
+
+We build simple appointment-automation setups for local businesses so enquiries get captured and confirmed automatically, even after hours.
+
+{cta}
+
+Thanks,

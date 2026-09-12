@@ -17,3 +17,4 @@ those two files distill from.
 | 3 | Overpass discoverer: Nominatim geocoding + Overpass query/parse | [03-overpass-discoverer.md](03-overpass-discoverer.md) |
 | 4 | Site crawler: robots.txt, contact emails, enrichment signals | [04-site-crawler.md](04-site-crawler.md) |
 | 5 | Filters, qualification, CSV export — the discover→enrich→CSV pipeline | [05-csv-export-and-qualification.md](05-csv-export-and-qualification.md) |
+| 6 | Gmail OAuth, compose, and send-queue decision logic (caps + suppression) | [06-gmail-oauth-and-send-queue.md](06-gmail-oauth-and-send-queue.md) |

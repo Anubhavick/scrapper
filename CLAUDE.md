@@ -7,12 +7,51 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–5 of PROJECT.md's build order are done — discover, enrich, and
-CSV export form one runnable pipeline now. No compose / send logic
-exists yet. What's real:
+Steps 1–6 of PROJECT.md's build order are done, with one deliberate
+deviation flagged below. Discover, enrich, and CSV export form one
+runnable pipeline (steps 1–5); step 6 added Gmail OAuth, message
+composition, and send-queue decision logic (caps + suppression) — but
+nothing yet calls any of it end-to-end, and there are no real Google API
+credentials to call it *with*. See docs/06 for the full breakdown. What's
+real:
 
-- `src/leadgen/{compose,send,api}` — still empty packages, right
-  structure, no logic.
+- **Deviation from PROJECT.md worth knowing:** step 5's CSV export is
+  supposed to be followed by a human "read 200 rows by hand" checkpoint
+  *before* building anything past it — the whole point being to confirm
+  the data justifies building the sending half at all. That checkpoint
+  hasn't happened (no confirmed live run against real Overpass/Nominatim
+  data exists yet). Step 6 was built anyway, on direct instruction. It
+  didn't need real target data to build or test, and sends are still
+  fully gated behind human approval (unbuilt) and real API credentials
+  (also unbuilt) — but don't mistake "step 6 exists" for "the hand-review
+  passed."
+- `src/leadgen/compose/render.py` — `render_message()`: offer template +
+  one generated line grounded in a real boolean signal. Raises if none of
+  the offer's `relevant_signals` were truthy — treated as an upstream
+  qualification bug, not something to paper over.
+- `src/leadgen/send/{crypto,oauth,gmail,caps,suppression,queue}.py` —
+  refresh-token encryption (Fernet), the Gmail OAuth authorization-code
+  flow (`gmail.send` scope only), MIME message building +
+  `users.messages.send`, and the pure decision logic for daily caps +
+  suppression + the 90–600s randomised gap (`check_sendable()` →
+  `SendBlocked`). All covered by mocked-`httpx`/pure-function tests, zero
+  real network calls.
+- `src/leadgen/db/{session,repository}.py` — engine/sessionmaker setup and
+  the two actual Postgres queries (`count_sent_today`,
+  `fetch_suppressions`) behind the caps/suppression decisions above.
+  **Not covered by the test suite** — `db/models.py`'s Postgres-specific
+  `JSONB`/`UUID` types don't work against SQLite, so these need a real
+  migrated Postgres to verify. Treat this the same way docs/03 treats
+  live Overpass/Nominatim reachability: unverified until someone runs it
+  against `docker compose up -d` + `alembic upgrade head`.
+- **Still not built, on purpose, per docs/06:** nothing turns a CSV of
+  qualified leads into `campaigns`/`messages` rows; nothing orchestrates
+  reading approved messages and actually calling `send/queue.py` +
+  `send/gmail.py` against them; there's no review/approval UI (step 8) so
+  the hard rule "no send without a human clicking approve" has nothing to
+  click yet; bounce/reply monitoring (step 7, needs restricted
+  `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched.
+- `src/leadgen/api` — still an empty package, right structure, no logic.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
 - `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
@@ -49,11 +88,15 @@ exists yet. What's real:
   production data, and before treating the `qualify.py` gap above as
   theoretical.
 
-Next per PROJECT.md's build order: **read 200 rows by hand** — this is
-a human task, not a build step. Once that's done and the data's judged
-good enough, come back for step 6 (Gmail OAuth + send queue + caps +
-suppression). Don't skip ahead to Gmail/send just because it's more
-interesting to build than waiting on a hand-review.
+Still outstanding, independent of step 6 now existing: **read 200 rows by
+hand** against a real target profile. Step 6 didn't require that data to
+build, but the next real send-side work (wiring `send/queue.py` +
+`send/gmail.py` into an actual orchestration loop, campaign/message
+creation from a CSV) will be working against fake or untested assumptions
+about lead quality until that review happens. Next concrete step: get
+real Gmail OAuth client credentials + a `TOKEN_ENCRYPTION_KEY` (see
+docs/06) so the send package can be exercised against a real account,
+rather than adding more logic nothing has called yet.
 
 ## Commands
 
