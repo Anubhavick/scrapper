@@ -7,21 +7,25 @@ this codebase*, not what it does.
 
 ## Current status
 
-Skeleton only, as of the first commit. No discover/enrich/compose/send
-logic exists yet. What's real:
+Steps 1–2 of PROJECT.md's build order are done. No discover / enrich /
+compose / send logic exists yet. What's real:
 
-- `src/leadgen/{config,discover,enrich,compose,send,db,api,util}` — empty
+- `src/leadgen/{discover,enrich,compose,send,api}` — still empty
   packages, right structure, no logic.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
+- `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
+  loader for target profiles, business types, and offers, with real
+  example files under `config/` and `targets/`.
 - Postgres 16 + Redis via docker-compose, Alembic wired up.
+- `docs/` has one file per completed build-order step — check there for
+  the full reasoning behind any non-obvious decision before redoing it.
 
-Next per PROJECT.md's build order: the Pydantic config loader for target
-profiles / business types / offers (step 2), then the Overpass
-discoverer (step 3). Don't skip ahead to send-side work before discover
-and enrich have been run against real data and someone has read 200 rows
-by hand (step 5) — that's the checkpoint that decides whether the second
-half is worth building at all.
+Next per PROJECT.md's build order: the Overpass discoverer (step 3).
+Don't skip ahead to send-side work before discover and enrich have been
+run against real data and someone has read 200 rows by hand (step 5) —
+that's the checkpoint that decides whether the second half is worth
+building at all.
 
 ## Commands
 

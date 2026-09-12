@@ -1,0 +1,7 @@
+id: appointment-automation
+subject_templates:
+  - "{business_name} — missed calls after hours?"
+  - "quick question about {business_name}'s bookings"
+body_template: templates/appointment_automation.txt
+relevant_signals: [no_online_booking, no_contact_form]
+cta: "Worth a 10-minute call this week?"

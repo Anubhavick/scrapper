@@ -1,0 +1,48 @@
+name: dentists-gurugram
+enabled: true
+
+business_type: dentist
+
+location:
+  mode: radius
+  center: "Gurugram, Haryana, India"
+  radius_km: 15
+
+source:
+  primary: overpass
+  fallback: places
+  max_results: 500
+
+filters:
+  must_have_website: true
+  must_have_phone: false
+  exclude_domains:
+    - practo.com
+    - justdial.com
+  exclude_name_patterns:
+    - "(?i)apollo"
+    - "(?i)fortis"
+  min_name_length: 3
+
+enrichment:
+  crawl_pages: [/, /contact, /about, /services, /book]
+  max_pages: 8
+  signals:
+    - no_https
+    - no_mobile_viewport
+    - no_contact_form
+    - no_online_booking
+    - site_platform
+    - last_content_year
+    - page_weight_mb
+    - has_whatsapp_link
+
+qualification:
+  require_email: true
+  require_any_signal: [no_online_booking, no_contact_form, last_content_year]
+  min_signal_count: 1
+
+outreach:
+  offer_id: appointment-automation
+  sender_pool: [sales1, sales2]
+  daily_cap_per_mailbox: 40

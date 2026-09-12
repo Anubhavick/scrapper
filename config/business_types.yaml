@@ -1,0 +1,21 @@
+# Maps a human business-type name to the identifiers each discovery
+# source uses. Adding a new vertical = adding one block here, no code.
+dentist:
+  osm:
+    - amenity=dentist
+    - healthcare=dentist
+  places_types: [dentist]
+  keywords: [dental clinic, dentist, orthodontist]
+
+gym:
+  osm:
+    - leisure=fitness_centre
+  places_types: [gym]
+  keywords: [gym, fitness centre, crossfit]
+
+plumber:
+  osm:
+    - craft=plumber
+    - shop=trade
+  places_types: [plumber]
+  keywords: [plumbing, plumber, drain repair]
