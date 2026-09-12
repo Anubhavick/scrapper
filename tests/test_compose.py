@@ -70,3 +70,32 @@ def test_render_message_raises_on_missing_template_file(tmp_path: Path) -> None:
             signals={"no_online_booking": True},
             templates_root=tmp_path,
         )
+
+
+def test_render_message_strips_control_and_brace_characters_from_name(tmp_path: Path) -> None:
+    templates_root = tmp_path
+    (templates_root / "templates").mkdir()
+    (templates_root / "templates" / "appointment_automation.txt").write_text(
+        "Hi, {generated_line} for {business_name}. {cta}"
+    )
+
+    subject, body = render_message(
+        business_name="Smile\x00 {Dental}‮",
+        offer=OFFER,
+        signals={"no_online_booking": True},
+        templates_root=templates_root,
+    )
+    assert "{" not in subject and "}" not in subject
+    assert "{" not in body and "}" not in body
+    assert "\x00" not in body and "‮" not in body
+    assert "Smile Dental" in body
+
+
+def test_render_message_raises_when_business_name_empty_after_sanitisation(tmp_path: Path) -> None:
+    with pytest.raises(ComposeError):
+        render_message(
+            business_name="\x00\x01  ",
+            offer=OFFER,
+            signals={"no_online_booking": True},
+            templates_root=tmp_path,
+        )

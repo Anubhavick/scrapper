@@ -13,6 +13,8 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from leadgen.enrich.http_defaults import CRAWL_REQUEST_TIMEOUT
+
 
 class RobotsChecker:
     def __init__(self, client: httpx.Client, user_agent: str) -> None:
@@ -32,7 +34,9 @@ class RobotsChecker:
         parser = RobotFileParser()
         try:
             response = self._client.get(
-                f"{origin}/robots.txt", headers={"User-Agent": self._user_agent}
+                f"{origin}/robots.txt",
+                headers={"User-Agent": self._user_agent},
+                timeout=CRAWL_REQUEST_TIMEOUT,
             )
         except httpx.HTTPError:
             # Unreachable robots.txt: fail open, matching stdlib

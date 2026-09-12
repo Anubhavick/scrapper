@@ -1,4 +1,8 @@
+import socket
+import ssl
+
 import httpx
+import pytest
 
 from leadgen.enrich.crawler import crawl_business, fetch_page
 from leadgen.enrich.robots import RobotsChecker
@@ -103,10 +107,10 @@ def test_crawl_business_rate_limits_between_pages(monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
 
-    # 3 monotonic() calls total for a 2-page crawl: one after page 1
-    # (records last_request_at), two for page 2 (the remaining-time
-    # check, then recording its own last_request_at).
-    clock = iter([0.0, 0.1, 0.1])
+    # 5 monotonic() calls total for a 2-page crawl: the initial deadline
+    # anchor, then per page one "now" read (reused for both the deadline
+    # check and the rate-limit math) plus one to record last_request_at.
+    clock = iter([0.0, 0.0, 0.0, 0.1, 0.1])
     monkeypatch.setattr("time.monotonic", lambda: next(clock))
 
     client = _client()
@@ -121,3 +125,50 @@ def test_crawl_business_rate_limits_between_pages(monkeypatch) -> None:
     )
     assert len(sleeps) == 1
     assert sleeps[0] == 0.9
+
+
+def test_crawl_business_stops_at_host_deadline(monkeypatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    client = _client()
+    robots = RobotsChecker(client, USER_AGENT)
+    result = crawl_business(
+        website_url="https://clinic.example/",
+        crawl_pages=["/", "/contact", "/about"],
+        max_pages=8,
+        client=client,
+        robots=robots,
+        user_agent=USER_AGENT,
+        host_deadline_seconds=0.0,  # already expired before the first page
+    )
+    assert result.pages == []
+    assert result.errors == ["error-timeout"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_tag"),
+    [
+        (httpx.ConnectTimeout("timed out"), "error-timeout"),
+        (httpx.ReadTimeout("timed out"), "error-timeout"),
+        (httpx.ConnectError("dns", request=None), "error-dns"),
+        (httpx.ConnectError("ssl", request=None), "error-ssl"),
+        (httpx.ConnectError("refused", request=None), "error-connection"),
+        (httpx.RemoteProtocolError("dropped"), "error-connection"),
+    ],
+)
+def test_fetch_page_classifies_network_failures(monkeypatch, exc, expected_tag) -> None:
+    if expected_tag == "error-dns":
+        exc.__cause__ = socket.gaierror("Name or service not known")
+    elif expected_tag == "error-ssl":
+        exc.__cause__ = ssl.SSLError("certificate verify failed")
+
+    def raising_get(*args, **kwargs):
+        raise exc
+
+    client = _client()
+    monkeypatch.setattr(client, "get", raising_get)
+
+    tags: list[str] = []
+    result = fetch_page("https://clinic.example/", client, USER_AGENT, on_error=tags.append)
+    assert result is None
+    assert tags == [expected_tag]

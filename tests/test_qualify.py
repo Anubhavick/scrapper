@@ -67,10 +67,34 @@ def test_require_email_false_allows_no_contacts(tmp_path: Path) -> None:
 
 
 def test_numeric_signal_counts_when_truthy_not_by_magnitude(tmp_path: Path) -> None:
-    # Documented interpretive gap (see qualify.py's module docstring):
-    # any non-None last_content_year counts, regardless of how old.
+    # No threshold configured: falls back to the pre-threshold behaviour
+    # (see qualify.py's module docstring) -- any non-None value counts,
+    # regardless of how old/heavy.
     profile = _profile(
         tmp_path, require_any_signal=["last_content_year"], min_signal_count=1
     )
     assert is_qualified(profile, CONTACT, {"last_content_year": 2024}) is True
     assert is_qualified(profile, CONTACT, {"last_content_year": None}) is False
+
+
+def test_stale_content_threshold_only_matches_below_cutoff(tmp_path: Path) -> None:
+    profile = _profile(
+        tmp_path,
+        require_any_signal=["last_content_year"],
+        min_signal_count=1,
+        stale_content_before_year=2023,
+    )
+    assert is_qualified(profile, CONTACT, {"last_content_year": 2020}) is True
+    assert is_qualified(profile, CONTACT, {"last_content_year": 2024}) is False
+    assert is_qualified(profile, CONTACT, {"last_content_year": None}) is False
+
+
+def test_page_weight_threshold_only_matches_above_cutoff(tmp_path: Path) -> None:
+    profile = _profile(
+        tmp_path,
+        require_any_signal=["page_weight_mb"],
+        min_signal_count=1,
+        max_page_weight_mb=4.5,
+    )
+    assert is_qualified(profile, CONTACT, {"page_weight_mb": 6.2}) is True
+    assert is_qualified(profile, CONTACT, {"page_weight_mb": 1.1}) is False

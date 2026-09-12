@@ -9,6 +9,7 @@ CASA review, deliberately not requested yet).
 from __future__ import annotations
 
 import base64
+from email.header import Header
 from email.mime.text import MIMEText
 
 import httpx
@@ -24,11 +25,24 @@ class GmailSendError(Exception):
 
 def build_raw_message(*, from_addr: str, to_addr: str, subject: str, body: str) -> str:
     """Build a base64url-encoded RFC 2822 message, as the Gmail API's
-    `raw` field requires."""
+    `raw` field requires.
+
+    `MIMEText(body, "plain", "utf-8")` already encodes the body correctly,
+    but a plain `mime["Subject"] = subject` does not: this module's
+    `Message` uses the legacy `compat32` policy, which serialises headers
+    assuming ASCII and raises `UnicodeEncodeError` at `.as_bytes()` time
+    the moment a business name (routine outside English-only markets)
+    contains a non-ASCII character. Wrapping in `email.header.Header`
+    applies RFC 2047 encoded-word encoding only when actually needed,
+    so plain-ASCII subjects are untouched."""
     mime = MIMEText(body, "plain", "utf-8")
     mime["From"] = from_addr
     mime["To"] = to_addr
-    mime["Subject"] = subject
+    try:
+        subject.encode("ascii")
+        mime["Subject"] = subject
+    except UnicodeEncodeError:
+        mime["Subject"] = Header(subject, "utf-8")
     return base64.urlsafe_b64encode(mime.as_bytes()).decode("ascii")
 
 

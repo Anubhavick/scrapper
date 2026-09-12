@@ -6,6 +6,7 @@ from leadgen.send.oauth import (
     build_authorization_url,
     exchange_code_for_tokens,
     refresh_access_token,
+    validate_token_health,
 )
 
 
@@ -64,3 +65,25 @@ def test_refresh_access_token_returns_new_access_token() -> None:
         _client(handler), client_id="c", client_secret="s", refresh_token="r"
     )
     assert result["access_token"] == "new-a"
+
+
+def test_validate_token_health_reports_healthy_on_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "new-a", "expires_in": 3600})
+
+    result = validate_token_health(
+        _client(handler), client_id="c", client_secret="s", refresh_token="r"
+    )
+    assert result.healthy is True
+    assert result.reason is None
+
+
+def test_validate_token_health_reports_unhealthy_without_raising() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    result = validate_token_health(
+        _client(handler), client_id="c", client_secret="s", refresh_token="revoked"
+    )
+    assert result.healthy is False
+    assert "invalid_grant" in result.reason

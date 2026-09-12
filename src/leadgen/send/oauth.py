@@ -10,6 +10,7 @@ stop expiring after 7 days. See docs/06 before registering real mailboxes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import httpx
@@ -18,7 +19,14 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
-__all__ = ["OAuthError", "build_authorization_url", "exchange_code_for_tokens", "refresh_access_token"]
+__all__ = [
+    "OAuthError",
+    "TokenHealth",
+    "build_authorization_url",
+    "exchange_code_for_tokens",
+    "refresh_access_token",
+    "validate_token_health",
+]
 
 
 class OAuthError(Exception):
@@ -81,6 +89,47 @@ def refresh_access_token(
         },
     )
     return _parse_token_response(response)
+
+
+@dataclass(frozen=True)
+class TokenHealth:
+    healthy: bool
+    reason: str | None = None
+
+
+def validate_token_health(
+    client: httpx.Client,
+    *,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> TokenHealth:
+    """Preflight check to run before a send loop starts, not during it:
+    confirms the stored (decrypted) refresh token can still mint a fresh
+    access token, without sending anything. There's no separate
+    "tokeninfo" call needed — attempting the refresh grant *is* the
+    standard way to validate a refresh token, since Google returns
+    `invalid_grant` for one that's dead (revoked consent, the 7-day
+    Testing-mode expiry this module's docstring flags, or an account
+    security event) the same way it would on the real thing.
+
+    Deliberately never raises: a caller runs this once per mailbox
+    before queuing any sends for it, and a dead token here should skip
+    that mailbox for the run (and surface for a human to re-authorize
+    via `build_authorization_url`), not crash mid-batch the way an
+    unhandled `OAuthError` from `refresh_access_token` inside the send
+    loop would.
+    """
+    try:
+        refresh_access_token(
+            client,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+    except OAuthError as exc:
+        return TokenHealth(healthy=False, reason=str(exc))
+    return TokenHealth(healthy=True)
 
 
 def _parse_token_response(response: httpx.Response) -> dict:

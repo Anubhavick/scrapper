@@ -65,7 +65,7 @@ def run_target_profile(
     """Discover businesses for `profile`, drop the ones its `filters`
     exclude, crawl the rest, and return one LeadRow per surviving
     business (crawled or not, if it had no website to crawl)."""
-    discovered = discover(profile, business_type, overpass_client, geocoder)
+    discovered = discover(profile, business_type, overpass_client, user_agent, geocoder)
     filtered = apply_filters(discovered, profile.filters)
 
     robots = RobotsChecker(crawl_client, user_agent)
@@ -84,7 +84,9 @@ def run_target_profile(
             robots=robots,
             user_agent=user_agent,
         )
-        rows.append(_lead_row(business, result.contacts, result.signals, profile))
+        rows.append(
+            _lead_row(business, result.contacts, result.signals, profile, errors=result.errors)
+        )
 
     return rows
 
@@ -94,8 +96,9 @@ def _lead_row(
     contacts: list[ContactCandidate],
     signals: dict[str, object],
     profile: TargetProfile,
+    errors: list[str] | None = None,
 ) -> LeadRow:
-    tags = compute_tags(has_website=business.website_url is not None, signals=signals)
+    tags = compute_tags(has_website=business.website_url is not None, signals=signals) + (errors or [])
     return LeadRow(
         name=business.name,
         website_url=business.website_url,

@@ -145,6 +145,30 @@ class Qualification(BaseModel):
     require_any_signal: list[str] = Field(default_factory=list)
     min_signal_count: int = Field(ge=0, default=0)
 
+    # Opt-in thresholds for the two non-boolean signals (see qualify.py's
+    # module docstring and docs/05): unset means a profile hasn't decided
+    # what counts as "stale" or "too heavy" yet, so the signal keeps
+    # counting toward require_any_signal on mere truthiness, exactly as
+    # before this field existed. Setting either is a target-profile
+    # author's call, per business/market, not something to hardcode here.
+    stale_content_before_year: int | None = Field(
+        default=None,
+        description=(
+            "last_content_year counts toward require_any_signal only when "
+            "it is older than (strictly less than) this year. Unset keeps "
+            "the pre-threshold behaviour: any non-None year counts."
+        ),
+    )
+    max_page_weight_mb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "page_weight_mb counts toward require_any_signal only when it "
+            "exceeds this. Unset keeps the pre-threshold behaviour: any "
+            "truthy weight counts."
+        ),
+    )
+
     @field_validator("require_any_signal")
     @classmethod
     def validate_signals(cls, v: list[str]) -> list[str]:

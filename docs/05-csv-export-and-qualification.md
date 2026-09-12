@@ -26,6 +26,20 @@ building anything else."
 - `tests/test_filters.py`, `tests/test_qualify.py`, `tests/test_pipeline.py`
   — 16 new tests, all against mocked HTTP or in-memory fixtures.
 
+## Update: the gap below now has an opt-in fix
+
+`qualify.py`'s non-boolean-signal gap (described below) is now resolved
+the way this doc originally suggested: `qualification.stale_content_before_year`
+and `qualification.max_page_weight_mb` are optional per-profile config
+fields (see `config/models.py`'s `Qualification`). Leaving them unset
+keeps every existing profile's behaviour byte-for-byte identical to what's
+described below — this section is kept as-is for that reason, and because
+the underlying point (don't hardcode this number in code) still stands.
+Setting a threshold is still a target-profile author's call per business
+type/market, made in that profile's YAML, not a constant this codebase
+picks for everyone. Still worth confirming against a real "read 200 rows
+by hand" run before trusting either signal, thresholded or not.
+
 ## The gap worth reading before using this for real
 
 **`qualify.py`'s handling of non-boolean signals is a placeholder, not
