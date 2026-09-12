@@ -53,7 +53,10 @@ What's done:
   qualification check against the profile's rules
 - **Pipeline**: `leadgen.pipeline.run_target_profile()` wires all of the
   above together end-to-end and `export_csv()` writes the result — see
-  "Running it" below
+  "Running it" below. Each row also gets auto-generated **tags**
+  (`no-website`, `no-booking`, `platform-wordpress`, `content-year-2019`,
+  …) from `leadgen.enrich.tags.compute_tags()`, so the CSV can be
+  filtered/sorted in a spreadsheet without opening the raw signals JSON.
 - **Compose**: `leadgen.compose.render.render_message()` fills an offer's
   subject/body template with one generated line grounded in a real
   boolean signal (e.g. "no online booking found")
@@ -64,7 +67,7 @@ What's done:
   for the 50/day cap, suppression checks, and the 90–600s randomised gap
   between sends. **Nothing orchestrates these into an actual send loop
   yet** — see [docs/06](docs/06-gmail-oauth-and-send-queue.md).
-- 137 passing tests, all against mocked HTTP, pure functions, or static
+- 144 passing tests, all against mocked HTTP, pure functions, or static
   fixtures — no real network calls, no real database, in the test suite
 
 What's not done, and things worth knowing before trusting this against
@@ -165,11 +168,23 @@ actually read it before anything past step 5 gets built.
 
 ## How the pipeline is designed to work
 
-Everything about *who* gets contacted lives in a target-profile YAML
-file (`targets/*.yaml`, not yet created) — business type, city, radius,
-filters. Changing what you target should never require a code change.
-See PROJECT.md for the full YAML format. The pipeline, once built, runs
-in these stages:
+Everything about *who* gets contacted lives in a target-profile YAML file
+(`targets/*.yaml`, e.g. `targets/dentists-gurugram.yaml`) — business
+type, city/radius, filters. Everything about *what you pitch* lives in a
+separate offer YAML file (`config/offers/*.yaml`). **Changing either
+never requires a code change:**
+
+- Different vertical or city → copy an existing `targets/*.yaml`, edit
+  `business_type` and `location`, done. New business type entirely →
+  add one block to `config/business_types.yaml` (OSM tags, Places type,
+  keywords).
+- Different pitch to the same leads (e.g. "automation" vs. "a website
+  tool") → add a new `config/offers/*.yaml` with its own
+  `subject_templates`/`body_template`/`relevant_signals`/`cta`, and point
+  a target profile's `outreach.offer_id` at it.
+
+See PROJECT.md for the full YAML format. The pipeline runs in these
+stages:
 
 ```
 target profile (YAML)

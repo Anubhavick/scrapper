@@ -85,3 +85,24 @@ Overpass/Nominatim reachability check flagged in docs/03, plus an
 actual website to crawl. Worth doing as the very next thing, on a
 normal network, before deciding whether this gap in `qualify.py`
 matters in practice.
+
+## Addendum (added later, alongside step 6): auto-generated `tags` column
+
+Not part of PROJECT.md's spec — added on direct request, to make the CSV
+usable as a spreadsheet you can filter/sort without opening the raw
+`signals` JSON column for every row. `src/leadgen/enrich/tags.py`'s
+`compute_tags()` turns a business's crawl signals into short strings like
+`no-website`, `no-booking`, `no-contact-form`, `platform-wordpress`,
+`content-year-2019` — appended to `LeadRow` and written to a new `tags`
+column (semicolon-separated, same convention as `emails`).
+
+No new API needed — everything here is already-crawled data, just
+restated for scanability. Deliberately kept descriptive, not diagnostic:
+the boolean signals get a plain tag when true, and the non-boolean ones
+(`site_platform`, `last_content_year`, `page_weight_mb`) get their raw
+value surfaced as a tag rather than a judgment call about whether that
+value is "bad" — the same reasoning as the `require_any_signal` gap
+above applies here too, so tags don't quietly encode a threshold nobody
+agreed to.
+
+7 new tests in `tests/test_tags.py`; `uv run pytest`: 144/144 passing.

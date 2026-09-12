@@ -25,8 +25,9 @@ from leadgen.enrich.crawler import crawl_business
 from leadgen.enrich.qualify import is_qualified
 from leadgen.enrich.robots import RobotsChecker
 from leadgen.enrich.signals import ContactCandidate
+from leadgen.enrich.tags import compute_tags
 
-CSV_FIELDS = ["name", "website_url", "phone", "address", "emails", "qualified", "signals"]
+CSV_FIELDS = ["name", "website_url", "phone", "address", "emails", "qualified", "tags", "signals"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class LeadRow:
     address: str | None
     emails: str
     qualified: bool
+    tags: str
     signals: str
 
     def as_csv_dict(self) -> dict[str, str]:
@@ -47,6 +49,7 @@ class LeadRow:
             "address": self.address or "",
             "emails": self.emails,
             "qualified": "yes" if self.qualified else "no",
+            "tags": self.tags,
             "signals": self.signals,
         }
 
@@ -92,6 +95,7 @@ def _lead_row(
     signals: dict[str, object],
     profile: TargetProfile,
 ) -> LeadRow:
+    tags = compute_tags(has_website=business.website_url is not None, signals=signals)
     return LeadRow(
         name=business.name,
         website_url=business.website_url,
@@ -99,6 +103,7 @@ def _lead_row(
         address=business.address,
         emails=";".join(c.email for c in contacts),
         qualified=is_qualified(profile, contacts, signals),
+        tags=";".join(tags),
         signals=json.dumps(signals, sort_keys=True),
     )
 

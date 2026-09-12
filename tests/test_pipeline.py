@@ -95,6 +95,7 @@ def test_run_target_profile_end_to_end(tmp_path: Path, monkeypatch) -> None:
     assert row.name == "Smile Dental"
     assert "info@smiledental.example" in row.emails
     assert row.qualified is True  # has email + no booking mention anywhere -> no_online_booking=True
+    assert "no-booking" in row.tags.split(";")
 
 
 def test_export_csv_writes_expected_rows(tmp_path: Path, monkeypatch) -> None:
@@ -115,3 +116,5 @@ def test_export_csv_writes_expected_rows(tmp_path: Path, monkeypatch) -> None:
     assert "Smile Dental" in content
     assert "info@smiledental.example" in content
     assert "qualified" in content.splitlines()[0]  # header row
+    assert "tags" in content.splitlines()[0]
+    assert "no-booking" in content
