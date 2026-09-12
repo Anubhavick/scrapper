@@ -117,10 +117,52 @@ test run.
 - **Bounce/reply monitoring** is step 7, needs the restricted
   `gmail.readonly`/`gmail.modify` scopes and CASA, and is untouched.
 
+## `scripts/authorize_mailbox.py` — the operational script that followed
+
+Building the modules above didn't require real Google credentials, but
+using them does — so once a Google Cloud OAuth client existed,
+`scripts/authorize_mailbox.py` was added as the one-time interactive tool
+that turns those credentials into an actual `mailboxes` row:
+
+```
+uv run python scripts/authorize_mailbox.py <short-name> <email-address>
+```
+
+It opens the browser to `build_authorization_url()`'s URL, catches the
+redirect on a local loopback HTTP server (works with a "Desktop app"
+OAuth client without registering a redirect URI — Google allows any
+`localhost` port for that client type), calls
+`exchange_code_for_tokens()`, encrypts the refresh token with
+`TokenCipher`, and inserts one `Mailbox` row via `db.session`.
+
+Two real gotchas hit while first running this, worth remembering:
+
+- **Test users aren't automatic.** While the OAuth consent screen is in
+  "Testing" status, even the Google account that owns the Cloud project
+  gets `Error 403: access_denied` unless it's *also* explicitly added
+  under Test users. Owning the project isn't the same as being allowed to
+  authorize against it.
+- **`gmail.send` doesn't cover `users.getProfile`.** The first version of
+  this script fetched the mailbox's email address automatically by
+  calling Gmail's profile endpoint with the fresh access token — that
+  call 403'd, because the `gmail.send` scope alone doesn't grant read
+  access to account profile info. Rather than add a broader scope just to
+  look up an address the operator already knows, the script now takes the
+  email address as a plain argument instead. One fewer scope requested is
+  also just a better default given the hard rule about minimal, auditable
+  access.
+
+Verified end-to-end against a real Google account: the mailbox now
+exists in Postgres with `oauth_refresh_token_encrypted` populated (228
+base64 chars, confirmed via `psql`, not plaintext) and everything else
+defaulted (`daily_cap = 50`, `is_active = true`).
+
 ## Verification
 
 `uv run pytest`: 137/137 passing (109 from steps 1–5, 28 new).
 
-No live call to any Google endpoint — there are no OAuth client
-credentials yet. That's exactly what's being set up next (see the
-follow-up on API keys needed for this step).
+`scripts/authorize_mailbox.py` has now been run successfully against a
+real Google account — see above. `send/gmail.send_message()` (the actual
+`users.messages.send` call) is still unverified against the live Gmail
+API; that's the natural next thing to test now that a real mailbox and
+access token are obtainable.
