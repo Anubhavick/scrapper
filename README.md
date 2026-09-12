@@ -7,9 +7,11 @@ through a team member's own Gmail account under strict rate caps — with
 a mandatory human-approval step and permanent suppression tracking.
 
 Full spec, data model, and legal posture: [PROJECT.md](PROJECT.md).
-Notes for anyone (human or Claude) working in this codebase:
-[CLAUDE.md](CLAUDE.md). A running build log, one file per completed
-step with the reasoning behind every non-obvious decision: [docs/](docs/).
+**Operator's guide — exact commands, step by step, from a fresh clone to
+a real test email: [HOWTO.md](HOWTO.md).** Notes for anyone (human or
+Claude) working in this codebase: [CLAUDE.md](CLAUDE.md). A running build
+log, one file per completed step with the reasoning behind every
+non-obvious decision: [docs/](docs/).
 
 ## Status: build order steps 1–6 done, out of 9
 

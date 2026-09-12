@@ -162,7 +162,13 @@ defaulted (`daily_cap = 50`, `is_active = true`).
 `uv run pytest`: 137/137 passing (109 from steps 1–5, 28 new).
 
 `scripts/authorize_mailbox.py` has now been run successfully against a
-real Google account — see above. `send/gmail.send_message()` (the actual
-`users.messages.send` call) is still unverified against the live Gmail
-API; that's the natural next thing to test now that a real mailbox and
-access token are obtainable.
+real Google account — see above. `scripts/send_test_email.py` then
+confirmed the full chain end to end against the live Gmail API: refresh
+the stored token, get an access token, build a MIME message, call
+`users.messages.send`, and receive a real Gmail message id back
+(delivered and visible in the recipient's inbox). Every piece of step 6
+that touches a real external service — OAuth, encryption/decryption, and
+the Gmail send call itself — is now verified against real accounts, not
+just mocks. What's still unverified is everything from docs/03 (live
+Overpass/Nominatim reachability) and the orchestration loop that would
+tie a real lead list to real sends, which still doesn't exist.
