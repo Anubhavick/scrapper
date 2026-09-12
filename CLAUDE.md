@@ -7,7 +7,8 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–4 of PROJECT.md's build order are done. No compose / send logic
+Steps 1–5 of PROJECT.md's build order are done — discover, enrich, and
+CSV export form one runnable pipeline now. No compose / send logic
 exists yet. What's real:
 
 - `src/leadgen/{compose,send,api}` — still empty packages, right
@@ -15,33 +16,44 @@ exists yet. What's real:
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
 - `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
-  loader for target profiles, business types, and offers, with real
-  example files under `config/` and `targets/`.
-- `src/leadgen/discover/{geocode,overpass}.py` — Nominatim geocoding
-  (cached, rate-limited) and an Overpass query builder/runner/parser
-  covering all four location modes. Returns plain `DiscoveredBusiness`
-  dataclasses — does **not** write to the `businesses` table yet; that
-  upsert logic doesn't exist until there's an actual orchestration
-  entry point calling this.
-- `src/leadgen/enrich/{robots,signals,crawler}.py` — robots.txt-aware,
-  rate-limited crawling of a business's own pages; extracts contact
-  emails (never guessed) and the 8 enrichment signals from PROJECT.md's
-  example list. Also returns plain dataclasses, no DB writes yet.
-- Postgres 16 + Redis via docker-compose, Alembic wired up.
+  loader for target profiles, business types, and offers.
+- `src/leadgen/discover/{geocode,overpass,filters}.py` — Nominatim
+  geocoding, Overpass query/run/parse (all 4 location modes), and
+  discovery-time filtering (`must_have_website`, `exclude_domains`,
+  etc.) applied before anything gets crawled.
+- `src/leadgen/enrich/{robots,signals,crawler,qualify}.py` —
+  robots.txt-aware rate-limited crawling, contact-email extraction
+  (never guessed), the 8 enrichment signals, and qualification against
+  a profile's rules. **`qualify.py` has a documented gap**: non-boolean
+  signals (`last_content_year`, `page_weight_mb`) count as "matched"
+  when truthy, not when their value indicates an actual problem —
+  there's no threshold anywhere in PROJECT.md's spec, and inventing one
+  wasn't a call to make unilaterally. See its module docstring and
+  docs/05 before relying on qualification for real decisions.
+- `src/leadgen/pipeline.py` — `run_target_profile()` / `export_csv()`:
+  the actual discover→filter→crawl→qualify→CSV wiring. **Still no
+  database** — this returns in-memory rows and writes a CSV file
+  directly; nothing here (or anywhere yet) upserts into
+  `businesses`/`contacts`/`enrichment_signals`/`crawl_cache`. That
+  persistence layer is intentionally deferred past step 5.
+- Postgres 16 + Redis via docker-compose, Alembic wired up (schema
+  exists and is migrated, just not written to by any code yet).
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 - **Known environment gap:** live network calls to Overpass/Nominatim
   hang indefinitely in the sandbox this was built in (see docs/03's
   Verification section) — the mocked test suite is solid, but nobody
   has confirmed this code reaches the real APIs from wherever it
-  actually runs. Check that before trusting discover/enrich against
-  production data.
+  actually runs. Check that — and actually run `pipeline.py` against a
+  real target profile and real website — before trusting this against
+  production data, and before treating the `qualify.py` gap above as
+  theoretical.
 
-Next per PROJECT.md's build order: CSV export (step 5), then **read 200
-rows by hand before building anything past this point** — that's the
-checkpoint that decides whether the second half (send-side work) is
-worth building at all. Don't skip ahead to Gmail/send just because it's
-more interesting to build.
+Next per PROJECT.md's build order: **read 200 rows by hand** — this is
+a human task, not a build step. Once that's done and the data's judged
+good enough, come back for step 6 (Gmail OAuth + send queue + caps +
+suppression). Don't skip ahead to Gmail/send just because it's more
+interesting to build than waiting on a hand-review.
 
 ## Commands
 

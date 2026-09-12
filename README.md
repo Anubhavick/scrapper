@@ -11,20 +11,22 @@ Notes for anyone (human or Claude) working in this codebase:
 [CLAUDE.md](CLAUDE.md). A running build log, one file per completed
 step with the reasoning behind every non-obvious decision: [docs/](docs/).
 
-## Status: build order steps 1–4 done, out of 9
+## Status: build order steps 1–5 done, out of 9
 
-**Discover and enrich are real and tested. Compose and send are not
-built yet.** So today you can point this at a target profile and get
-back businesses + their contact emails + enrichment signals — but
-nothing drafts a message, and nothing sends. Per PROJECT.md's build
-order, that's deliberate: steps 1–5 (skeleton → discover → enrich → CSV
-export → read 200 rows by hand) are designed to prove the data is worth
-acting on *before* the sending half gets built at all.
+**Discover → enrich → CSV export is a real, runnable pipeline now.
+Compose and send are not built yet.** So today you can point this at a
+target profile and get back a CSV of businesses, their contact emails,
+enrichment signals, and a qualified yes/no — but nothing drafts a
+message, and nothing sends. Per PROJECT.md's build order, that's
+deliberate: steps 1–5 exist specifically to prove the data is worth
+acting on *before* the sending half gets built at all — and step 5's
+CSV is meant to be read by a human, 200 rows at a time, before anything
+past this point gets built.
 
 What's done:
 
 - Postgres 16 + Redis via Docker Compose; full schema (10 tables),
-  migrated with Alembic
+  migrated with Alembic — **though nothing writes to it yet**, see below
 - `normalise_domain()` — the domain-dedup function everything else
   depends on
 - A Pydantic-validated config loader for target profiles, business
@@ -32,22 +34,42 @@ What's done:
   stack trace
 - **Discover**: Nominatim geocoding (cached, rate-limited) + an Overpass
   query builder/runner/parser covering all four location modes
-  (`radius`/`bbox`/`city`/`admin_area`) — no API key needed
+  (`radius`/`bbox`/`city`/`admin_area`) — no API key needed — plus
+  discovery-time filtering (`exclude_domains`, `must_have_website`, …)
 - **Enrich**: a robots.txt-respecting, rate-limited crawler for a
-  business's own pages, extracting contact emails (never guessed) and
-  the 8 enrichment signals from PROJECT.md's example list
-- 93 passing tests, all against mocked HTTP or static fixtures — no
+  business's own pages, extracting contact emails (never guessed), the
+  8 enrichment signals from PROJECT.md's example list, and a
+  qualification check against the profile's rules
+- **Pipeline**: `leadgen.pipeline.run_target_profile()` wires all of the
+  above together end-to-end and `export_csv()` writes the result — see
+  "Running it" below
+- 109 passing tests, all against mocked HTTP or static fixtures — no
   real network calls in the test suite
 
-What's not done: qualification-rule application, CSV export, compose,
-send, monitor, the API/review UI, and the actual database-persistence
-wiring for discover/enrich (they currently return plain Python objects,
-not rows in `businesses`/`contacts`/`enrichment_signals` — that's an
-orchestration layer that doesn't exist yet). See [docs/](docs/) for the
-step-by-step detail, including one open item: live network calls to
-Overpass/Nominatim haven't been confirmed reachable from every
-environment this was built in — check that before trusting real data
-from a new machine (docs/03's Verification section has the specifics).
+What's not done, and two things worth knowing before trusting this
+against real data:
+
+- Compose, send, monitor, and the API/review UI don't exist yet.
+- **No database persistence anywhere.** Discover/enrich/pipeline all
+  return plain Python objects and write a CSV directly — nothing
+  upserts into `businesses`/`contacts`/`enrichment_signals`/
+  `crawl_cache` yet. The schema is migrated and ready; the write path
+  just hasn't been built, because step 5 doesn't need it.
+- **Qualification has a documented gap.** `require_any_signal` entries
+  that aren't booleans (`last_content_year`, `page_weight_mb`) count as
+  "matched" whenever the crawler found *any* value — not when that
+  value indicates an actual problem — because PROJECT.md never defines
+  a staleness/weight threshold, and guessing one would quietly decide
+  who gets contacted. See `src/leadgen/enrich/qualify.py`'s docstring
+  and [docs/05](docs/05-csv-export-and-qualification.md).
+- **Live network reachability to Overpass/Nominatim hasn't been
+  confirmed from every environment.** It hung indefinitely in the
+  sandbox this was built in (see
+  [docs/03](docs/03-overpass-discoverer.md)'s Verification section) —
+  the mocked test suite is solid, but that's not proof the real APIs
+  are reachable from wherever this actually runs. Check that — and
+  actually crawl a real site — before reading the CSV output as
+  meaningful.
 
 ## Setup
 
@@ -76,6 +98,41 @@ slow ramp-up on large transfers — retry with:
 ```bash
 UV_HTTP_TIMEOUT=240 uv sync
 ```
+
+## Running it
+
+There's no CLI yet — call the pipeline directly:
+
+```python
+import httpx
+from pathlib import Path
+
+from leadgen.config.loader import load_business_types, load_target_profile
+from leadgen.discover.geocode import NominatimClient
+from leadgen.pipeline import export_csv, run_target_profile
+
+business_types = load_business_types(Path("config/business_types.yaml"))
+profile = load_target_profile(Path("targets/dentists-gurugram.yaml"), business_types)
+
+user_agent = "your-bot/0.1 (+contact: you@example.com)"  # a real one — see .env.example
+geocoder = NominatimClient(user_agent=user_agent, cache_dir=Path(".cache/nominatim"))
+
+with httpx.Client(timeout=60.0) as overpass_client, httpx.Client(timeout=30.0) as crawl_client:
+    rows = run_target_profile(
+        profile,
+        business_types[profile.business_type],
+        overpass_client=overpass_client,
+        crawl_client=crawl_client,
+        user_agent=user_agent,
+        geocoder=geocoder,
+    )
+
+export_csv(rows, Path("leads.csv"))
+```
+
+This is exactly the "read 200 rows by hand" checkpoint from PROJECT.md's
+build order — run it against a real profile, open `leads.csv`, and
+actually read it before anything past step 5 gets built.
 
 ## How the pipeline is designed to work
 
@@ -124,24 +181,23 @@ target profile (YAML)
   - factual signals the profile asks for (no HTTPS, no mobile viewport,
     no booking widget, site platform, last-updated year, page weight,
     WhatsApp link presence, etc.)
-- Both currently return plain Python objects (`DiscoveredBusiness`,
-  `CrawlResult`) rather than writing to the database — there's no
-  orchestration entry point yet that upserts them into
-  `businesses`/`contacts`/`enrichment_signals`, and no CLI to run them
-  against a target profile end-to-end. That wiring, plus **qualifying**
-  a business into a sendable lead (checking the profile's
-  `qualification` rules — has an email, has at least N of the requested
-  signals) and CSV export, are next (steps 5 in the build order).
-- Raw HTML caching (`crawl_cache`, so re-running discover/enrich during
-  development never re-crawls a page that's still fresh) is designed
-  into the schema but not wired up yet either — it depends on the same
-  persistence layer.
+- `leadgen.pipeline.run_target_profile()` wires discover → filter →
+  crawl → qualify together and returns one row per surviving business;
+  `export_csv()` writes those rows to a file. See "Running it" above.
+- Both discover and enrich still return plain Python objects
+  (`DiscoveredBusiness`, `CrawlResult`) rather than writing to the
+  database — nothing upserts into
+  `businesses`/`contacts`/`enrichment_signals` yet, and raw HTML caching
+  (`crawl_cache`, so re-running during development never re-crawls a
+  page that's still fresh) is designed into the schema but not wired up.
+  That persistence layer is intentionally deferred past the "read 200
+  rows by hand" checkpoint below.
 
 Per PROJECT.md's build order: config loader → Overpass discoverer →
-site crawler (all three done) → CSV export → **read 200 rows by hand
+site crawler → CSV export (all four done) → **read 200 rows by hand
 before building anything past this point** — the point is to find out
 whether the data is good enough to justify building the sending half at
-all.
+all. That hand-review is a human task now, not a build step.
 
 ### How sending automation will work
 
@@ -172,17 +228,18 @@ after discover/enrich/qualify have proven the data is worth acting on.
 
 ```
 src/leadgen/
-  config/    target profiles, business types, offers  (implemented)
-  discover/  Overpass geocoding + query/parse           (implemented; Places/CSV not yet)
-  enrich/    site crawler → contacts + signals          (implemented)
-  compose/   template + generated line → draft messages (not yet implemented)
-  send/      Gmail OAuth, send queue, caps, suppression (not yet implemented)
-  db/        SQLAlchemy models (implemented)
-  api/       FastAPI + review UI                        (not yet implemented)
-  util/      normalise_domain() and friends (implemented)
-alembic/     migrations
-config/      business_types.yaml, offers/*.yaml (example data)
-targets/     target profile YAML files (example data)
-docs/        one file per completed build-order step
+  config/     target profiles, business types, offers  (implemented)
+  discover/   Overpass geocoding + query/parse + filters (implemented; Places/CSV not yet)
+  enrich/     site crawler → contacts + signals + qualify (implemented)
+  pipeline.py discover → filter → crawl → qualify → CSV  (implemented)
+  compose/    template + generated line → draft messages (not yet implemented)
+  send/       Gmail OAuth, send queue, caps, suppression (not yet implemented)
+  db/         SQLAlchemy models (implemented; nothing writes to it yet)
+  api/        FastAPI + review UI                        (not yet implemented)
+  util/       normalise_domain() and friends (implemented)
+alembic/      migrations
+config/       business_types.yaml, offers/*.yaml (example data)
+targets/      target profile YAML files (example data)
+docs/         one file per completed build-order step
 tests/
 ```
