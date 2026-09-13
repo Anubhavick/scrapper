@@ -7,37 +7,43 @@ through a team member's own Gmail account under strict rate caps — with
 a mandatory human-approval step and permanent suppression tracking.
 
 Full spec, data model, and legal posture: [PROJECT.md](PROJECT.md).
-**Operator's guide — exact commands, step by step, from a fresh clone to
-a real test email: [HOWTO.md](HOWTO.md).** Notes for anyone (human or
-Claude) working in this codebase: [CLAUDE.md](CLAUDE.md). A running build
-log, one file per completed step with the reasoning behind every
-non-obvious decision: [docs/](docs/).
+**New here? Start with [MANUAL.md](MANUAL.md)** — architecture, module
+reference, and current status in one place. **Operator's guide — exact
+commands, step by step, from a fresh clone to a real test email:
+[HOWTO.md](HOWTO.md).** Notes for anyone (human or Claude) working in
+this codebase: [CLAUDE.md](CLAUDE.md). A running build log, one file per
+completed step with the reasoning behind every non-obvious decision:
+[docs/](docs/).
 
-## Status: build order steps 1–6 done, out of 9
+## Status: build order steps 1–6 done, step 8 partial, out of 9
 
-**Discover → enrich → CSV export is a real, runnable pipeline (steps
-1–5). Step 6 added the Gmail OAuth flow, message composition, and the
-send-queue decision logic (daily caps + suppression) — but nothing
-calls any of it end-to-end yet, and there are no real Google API
-credentials to call it with.** So today you can point this at a target
-profile and get back a CSV of businesses, their contact emails,
-enrichment signals, and a qualified yes/no — and separately, the pieces
-that *would* send an email (encryption, OAuth, MIME building, cap +
-suppression checks) exist and are tested, but nothing wires them
-together into an actual send yet.
+**Discover → enrich → CSV/Postgres is a real, runnable, and now
+persisted pipeline (steps 1–5, plus DB persistence added afterward).
+Step 6 added the Gmail OAuth flow, message composition, and the
+send-queue decision logic — verified end-to-end against a real Gmail
+account (a real message was actually sent and received). A minimal
+lead-review UI exists (part of step 8). What's still missing is the
+orchestration loop connecting a reviewed lead list to an actual approved
+send, and the message-approval UI that has to sit in front of it.**
 
 **Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
 hard gate — read 200 rows by hand *before* building anything past it,
-specifically to confirm the data justifies building the sending half at
-all. That hand-review hasn't happened yet (no confirmed live run against
-real Overpass/Nominatim data — see below). Step 6 was built ahead of
-that review anyway; see [docs/06](docs/06-gmail-oauth-and-send-queue.md)
-for why that's flagged rather than quietly done.
+to confirm the data justifies building the sending half at all. That
+review has now happened, at smaller volume than 200 (31 real rows) —
+see [docs/07](docs/07-review-ui.md) for what it found and fixed. Worth
+repeating at larger volume before trusting qualification broadly across
+other business types/cities. Step 6 was originally built *ahead* of
+that review, on direct instruction — see
+[docs/06](docs/06-gmail-oauth-and-send-queue.md).
 
 What's done:
 
 - Postgres 16 + Redis via Docker Compose; full schema (10 tables),
-  migrated with Alembic — **though nothing writes to it yet**, see below
+  migrated with Alembic. **Now actually written to** —
+  `businesses`/`contacts`/`enrichment_signals`/`target_runs` are
+  populated by every persistence-enabled pipeline run (see
+  [docs/08](docs/08-persistence.md)); `campaigns`/`messages` are still
+  untouched.
 - `normalise_domain()` — the domain-dedup function everything else
   depends on
 - A Pydantic-validated config loader for target profiles, business
@@ -46,62 +52,61 @@ What's done:
 - **Discover**: Nominatim geocoding (cached, rate-limited) + an Overpass
   query builder/runner/parser covering all four location modes
   (`radius`/`bbox`/`city`/`admin_area`) — no API key needed — plus
-  discovery-time filtering (`exclude_domains`, `must_have_website`, …)
+  discovery-time filtering (`exclude_domains`, `must_have_website`, …).
+  Confirmed reachable from a real machine against real Overpass/
+  Nominatim, not just mocks (docs/03).
 - **Enrich**: a robots.txt-respecting, rate-limited crawler for a
   business's own pages, extracting contact emails (never guessed), the
   8 enrichment signals from PROJECT.md's example list, and a
   qualification check against the profile's rules
 - **Pipeline**: `leadgen.pipeline.run_target_profile()` wires all of the
-  above together end-to-end and `export_csv()` writes the result — see
-  "Running it" below. Each row also gets auto-generated **tags**
-  (`no-website`, `no-booking`, `platform-wordpress`, `content-year-2019`,
-  …) from `leadgen.enrich.tags.compute_tags()`, so the CSV can be
-  filtered/sorted in a spreadsheet without opening the raw signals JSON.
+  above together end-to-end, optionally persisting to Postgres as it
+  goes, and `export_csv()` writes a CSV either way. Each row also gets
+  auto-generated **tags** (`no-website`, `no-booking`,
+  `platform-wordpress`, `content-year-2019`, …) and a `crawl_status`
+  (`ok`/`partial`/`unreachable`/`no_website`) so a dead site can't be
+  mistaken for one with genuinely empty signals.
+- **Review UI**: `leadgen.api.review` — a small FastAPI app to filter a
+  run's leads and reject bad OSM matches with one click
+  (`uv run uvicorn leadgen.api.review:app --reload`). Doesn't yet do
+  message approval — see docs/07.
 - **Compose**: `leadgen.compose.render.render_message()` fills an offer's
   subject/body template with one generated line grounded in a real
   boolean signal (e.g. "no online booking found")
-- **Send building blocks**: `leadgen.send.{crypto,oauth,gmail,caps,
-  suppression,queue}` — refresh-token encryption, the Gmail OAuth
-  authorization-code flow (`gmail.send` scope only), MIME message
-  building + the actual Gmail API send call, and the pure decision logic
-  for the 50/day cap, suppression checks, and the 90–600s randomised gap
-  between sends. **Nothing orchestrates these into an actual send loop
-  yet** — see [docs/06](docs/06-gmail-oauth-and-send-queue.md).
-- 144 passing tests, all against mocked HTTP, pure functions, or static
-  fixtures — no real network calls, no real database, in the test suite
+- **Send**: `leadgen.send.{crypto,oauth,gmail,caps,suppression,queue}` —
+  refresh-token encryption, the Gmail OAuth authorization-code flow
+  (`gmail.send` scope only), MIME message building + the actual Gmail
+  API send call, and the pure decision logic for the 50/day cap,
+  suppression checks, and the 90–600s randomised gap between sends.
+  **Verified against a real Gmail account** — `scripts/authorize_
+  mailbox.py` + `scripts/send_test_email.py` sent and received a real
+  message. **Nothing orchestrates these into an actual send loop yet.**
+- 170 passing tests, all against mocked HTTP, pure functions, or static
+  fixtures — no real network calls in the test suite itself (real
+  verification runs, listed above, were separate manual steps)
 
 What's not done, and things worth knowing before trusting this against
 real data or a real send:
 
-- No orchestration ties compose/send into an actual send loop; no
-  campaign/message creation from a CSV; no review/approval UI (so the
-  hard rule "no send without human approval" has nothing to click yet);
-  monitor (bounce/reply handling) doesn't exist. The API/review UI don't
-  exist yet either.
-- **No database persistence for discover/enrich/pipeline.** They still
-  return plain Python objects and write a CSV directly — nothing upserts
-  into `businesses`/`contacts`/`enrichment_signals`/`crawl_cache` yet.
-  Step 6 did add `leadgen.db.session`/`leadgen.db.repository` for the two
-  queries the send caps/suppression logic needs (`count_sent_today`,
-  `fetch_suppressions`), but those are **untested against a real
-  Postgres** — `db/models.py`'s JSONB/UUID columns aren't SQLite-
-  compatible, so run `docker compose up -d` + `alembic upgrade head`
-  before trusting them.
-- **Qualification has a documented gap.** `require_any_signal` entries
-  that aren't booleans (`last_content_year`, `page_weight_mb`) count as
-  "matched" whenever the crawler found *any* value — not when that
-  value indicates an actual problem — because PROJECT.md never defines
-  a staleness/weight threshold, and guessing one would quietly decide
-  who gets contacted. See `src/leadgen/enrich/qualify.py`'s docstring
-  and [docs/05](docs/05-csv-export-and-qualification.md).
-- **Live network reachability to Overpass/Nominatim hasn't been
-  confirmed from every environment.** It hung indefinitely in the
-  sandbox this was built in (see
-  [docs/03](docs/03-overpass-discoverer.md)'s Verification section) —
-  the mocked test suite is solid, but that's not proof the real APIs
-  are reachable from wherever this actually runs. Check that — and
-  actually crawl a real site — before reading the CSV output as
-  meaningful.
+- **No orchestration loop and no message-approval UI.** Nothing turns a
+  `target_run` into a `campaigns`/`messages` row, nothing loops over
+  approved messages calling `send.queue`/`send.gmail`, and there's
+  nothing to click "approve" on a rendered message yet — so the hard
+  rule "no send without human approval" has nothing to click. This is
+  the actual next piece of work.
+- Bounce/reply monitoring (step 7) doesn't exist — needs the restricted
+  `gmail.readonly`/`gmail.modify` scopes and a Google CASA review.
+- **Qualification has a documented, partially-closed gap.** Non-boolean
+  signals (`last_content_year`, `page_weight_mb`) only count as a real
+  problem if a profile opts in via `qualification.stale_content_before_
+  year` / `max_page_weight_mb`; without that they still count as
+  "matched" whenever truthy, unchanged from before. Separately,
+  `last_content_year` itself is still computed by regexing full page
+  text for the largest year found, which reliably mistakes a "© 2026"
+  footer for real content freshness — flagged, not yet fixed (docs/07).
+- `businesses.normalized_domain`'s partial unique index doesn't hold for
+  a real multi-location chain sharing one domain — handled, not fully
+  solved (see [docs/08](docs/08-persistence.md)).
 
 ## Setup
 
@@ -133,38 +138,25 @@ UV_HTTP_TIMEOUT=240 uv sync
 
 ## Running it
 
-There's no CLI yet — call the pipeline directly:
-
-```python
-import httpx
-from pathlib import Path
-
-from leadgen.config.loader import load_business_types, load_target_profile
-from leadgen.discover.geocode import NominatimClient
-from leadgen.pipeline import export_csv, run_target_profile
-
-business_types = load_business_types(Path("config/business_types.yaml"))
-profile = load_target_profile(Path("targets/dentists-gurugram.yaml"), business_types)
-
-user_agent = "your-bot/0.1 (+contact: you@example.com)"  # a real one — see .env.example
-geocoder = NominatimClient(user_agent=user_agent, cache_dir=Path(".cache/nominatim"))
-
-with httpx.Client(timeout=60.0) as overpass_client, httpx.Client(timeout=30.0) as crawl_client:
-    rows = run_target_profile(
-        profile,
-        business_types[profile.business_type],
-        overpass_client=overpass_client,
-        crawl_client=crawl_client,
-        user_agent=user_agent,
-        geocoder=geocoder,
-    )
-
-export_csv(rows, Path("leads.csv"))
+```bash
+uv run python scripts/run_pipeline.py targets/dentists-gurugram.yaml leads.csv
 ```
 
-This is exactly the "read 200 rows by hand" checkpoint from PROJECT.md's
-build order — run it against a real profile, open `leads.csv`, and
-actually read it before anything past step 5 gets built.
+This discovers, crawls, and qualifies against a real target profile,
+persists everything to Postgres (a `target_runs` row plus
+`businesses`/`contacts`/`enrichment_signals`), and writes `leads.csv` too.
+Add `--no-db` to skip persistence and only write the CSV. Then review the
+result in a browser instead of a raw file:
+
+```bash
+uv run uvicorn leadgen.api.review:app --reload
+# open http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-gurugram.yaml
+```
+
+This is the "read 200 rows by hand" checkpoint from PROJECT.md's build
+order — actually read the leads before trusting qualification, and
+before anything past the review/campaign stage gets built for a new
+target profile you haven't run yet.
 
 ## How the pipeline is designed to work
 
@@ -228,14 +220,13 @@ target profile (YAML)
 - `leadgen.pipeline.run_target_profile()` wires discover → filter →
   crawl → qualify together and returns one row per surviving business;
   `export_csv()` writes those rows to a file. See "Running it" above.
-- Both discover and enrich still return plain Python objects
-  (`DiscoveredBusiness`, `CrawlResult`) rather than writing to the
-  database — nothing upserts into
-  `businesses`/`contacts`/`enrichment_signals` yet, and raw HTML caching
-  (`crawl_cache`, so re-running during development never re-crawls a
-  page that's still fresh) is designed into the schema but not wired up.
-  That persistence layer is intentionally deferred past the "read 200
-  rows by hand" checkpoint below.
+- `run_target_profile()` optionally persists as it runs — pass `session`/
+  `target_name`/`profile_yaml_text` and it upserts into
+  `businesses`/`contacts`/`enrichment_signals` and tracks the run itself
+  in `target_runs` (docs/08); `scripts/run_pipeline.py` does this by
+  default. Raw HTML caching (`crawl_cache`, so re-running during
+  development never re-crawls a page that's still fresh) is designed
+  into the schema but still not wired up — nothing writes to it yet.
 
 Per PROJECT.md's build order: config loader → Overpass discoverer →
 site crawler → CSV export (all four done) → **read 200 rows by hand
@@ -278,13 +269,14 @@ all. That hand-review is a human task now, not a build step.
   DPDP). Default posture is the strictest of the three. **This is not
   legal advice — verify before the first real send.**
 
-**What's missing to actually send anything**: real Google OAuth client
-credentials and a `TOKEN_ENCRYPTION_KEY` (see the API keys section once
-it's written up), an orchestration loop that reads `messages` rows and
-calls the pieces above in order, campaign/message creation from a CSV,
-and the review/approval UI (step 8) for the human-approval hard rule.
-See [docs/06](docs/06-gmail-oauth-and-send-queue.md) for the full list
-and why this was built ahead of the "read 200 rows by hand" checkpoint.
+**What's missing to actually send anything**: an orchestration loop that
+turns a `target_run` into `campaigns`/`messages` rows and then reads
+approved ones, calling the pieces above in order; and the
+message-approval UI (part of step 8) for the human-approval hard rule —
+`leadgen.api.review` today only reviews *leads*, not rendered messages.
+Real Google OAuth credentials and a `TOKEN_ENCRYPTION_KEY` already exist
+and have been verified against a real account (HOWTO.md, docs/06) — that
+part is no longer a blocker.
 
 ## Project layout
 
@@ -293,13 +285,16 @@ src/leadgen/
   config/     target profiles, business types, offers  (implemented)
   discover/   Overpass geocoding + query/parse + filters (implemented; Places/CSV not yet)
   enrich/     site crawler → contacts + signals + qualify (implemented)
-  pipeline.py discover → filter → crawl → qualify → CSV  (implemented)
+  pipeline.py discover → filter → crawl → qualify → CSV + optional Postgres persist (implemented)
   compose/    template + generated line → draft messages (implemented)
   send/       Gmail OAuth, MIME+send, caps, suppression, queue decision logic
-              (implemented; nothing orchestrates these into a send loop yet)
-  db/         SQLAlchemy models (implemented); session + the two send-side
-              queries (implemented, untested against a real Postgres)
-  api/        FastAPI + review UI                        (not yet implemented)
+              (implemented, verified against a real account; nothing
+              orchestrates these into a send loop yet)
+  db/         SQLAlchemy models; session + send-side queries; persist.py
+              (business/contact/signal/target_run upserts) — all implemented,
+              verified against a real Postgres (docs/08)
+  api/        FastAPI lead-review UI (implemented, docs/07); message-approval
+              UI (not yet implemented)
   util/       normalise_domain() and friends (implemented)
 alembic/      migrations
 config/       business_types.yaml, offers/*.yaml (example data)
