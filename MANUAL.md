@@ -126,15 +126,19 @@ missing capability (see §7).
 - **Without a `session`**: pure, in-memory, CSV-only. No database
   dependency at all — this is how the whole test suite exercises it.
 - **With a `session`** (what `scripts/run_pipeline.py` does by default):
-  it also creates a `target_runs` row up front and upserts every
-  business/contact/signal into Postgres as it crawls, marking the run
+  it also creates a `target_runs` row up front, upserts every
+  business/contact/signal into Postgres as it crawls, records a
+  `target_run_businesses` row per business (that run's own
+  qualified/crawl_status/tags verdict — see §4), and marks the run
   `completed` or `failed` at the end.
 
 This was deferred from step 5 on purpose (PROJECT.md's build order says
 so explicitly) until there was a concrete reason to need it — there now
-is: a run-history view and an editable/re-runnable campaign both need
-real rows with real IDs to reference, not a CSV that's gone the moment
-you overwrite it.
+is: a run-history view (built, see below) and an editable/re-runnable
+campaign both need real rows with real IDs to reference, not a CSV
+that's gone the moment you overwrite it. The run-history view itself —
+`/runs` and `/runs/{id}` in `api/review.py`, reading exactly these
+tables instead of a CSV — is docs/09.
 
 ### 3.4 Where the database ends and campaigns begin (not built yet)
 
@@ -148,9 +152,9 @@ message → an orchestration loop calls `send/queue.py` +
 
 ## 4. Data model
 
-Ten tables, defined in `src/leadgen/db/models.py`, one Alembic migration
-so far. Full column list is in the code (it's the more authoritative
-source — this is a summary):
+Eleven tables, defined in `src/leadgen/db/models.py`, two Alembic
+migrations so far. Full column list is in the code (it's the more
+authoritative source — this is a summary):
 
 | Table | Purpose | Notable constraint / decision |
 |---|---|---|
@@ -159,6 +163,7 @@ source — this is a summary):
 | `enrichment_signals` | key/value facts from the site | one row per `(business_id, key)`; re-crawl updates in place, no history |
 | `crawl_cache` | raw HTML + fetched_at | designed for re-crawl avoidance during dev; **not written to by any code yet** |
 | `target_runs` | one row per pipeline execution | stores the **full resolved profile YAML**, not a reference, so a run stays reproducible even if the file changes later |
+| `target_run_businesses` | join: which businesses a run found, with that run's qualified/crawl_status/tags | (docs/09) these three live here, not on `businesses`, because a re-scan of the same business can change them; unique on `(target_run_id, business_id)` |
 | `campaigns` | a target run + an offer + a sender pool | offer is referenced by id (config file), not a foreign key — offers live in YAML, never the DB |
 | `campaign_mailboxes` | join table, campaign ↔ sender pool | |
 | `mailboxes` | a sending Gmail identity | **no daily-counter column, on purpose** — it's derived from `messages.sent_at` at query time, so there's nothing to drift out of sync with a badly-timed reset job |
@@ -182,14 +187,14 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `discover/` | Nominatim geocoding (cached) + Overpass query/run/parse (all 4 location modes) + discovery-time filters | Done; confirmed reachable against real Overpass/Nominatim (docs/03). Places/CSV sources not implemented |
 | `enrich/` | robots.txt-aware rate-limited crawler, email extraction (never guessed), 8 signals, qualification | Done. Known gap: `last_content_year` regexes full page text and gets fooled by copyright footers (docs/07) |
 | `pipeline.py` | Wires discover → filter → crawl → qualify → CSV, optionally persisting to Postgres | Done, verified against real Postgres (docs/08) |
-| `db/persist.py` | Upserts for businesses/contacts/signals/target_runs | Done, verified against real Postgres |
+| `db/persist.py` | Upserts for businesses/contacts/signals/target_runs/target_run_businesses | Done, verified against real Postgres |
 | `db/repository.py` | The two Postgres queries behind send caps/suppression (`count_sent_today`, `fetch_suppressions`, `reserve_send_slot`) | Done; **not covered by the automated test suite** (JSONB/UUID aren't SQLite-compatible) — verify manually against real Postgres before relying on it |
 | `db/session.py` | Engine/sessionmaker, reads `DATABASE_URL` | Done |
 | `db/models.py` | Full SQLAlchemy schema | Done, migrated |
 | `compose/render.py` | Renders subject + one generated line from an offer template, grounded in a real signal | Done, tested. Raises rather than fabricating a generic line if no relevant signal is actually true |
 | `send/{crypto,oauth,gmail,caps,suppression,queue}.py` | Refresh-token encryption, Gmail OAuth flow (`gmail.send` only), MIME + actual send call, cap/suppression/delay decision logic | Done, tested; **verified against a real Gmail account** (a real message was sent and received) |
-| `api/review.py` | FastAPI lead-review UI: filter a run's leads, reject bad matches | Done (docs/07). Message-approval UI is a separate, unbuilt piece |
-| `api/` (rest) | Everything else — campaign creation, message approval, orchestration trigger | **Not built** |
+| `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09) | Done. Message-approval UI is a separate, unbuilt piece |
+| `api/` (rest) | The scan-builder form (target-profile YAML from a form), campaign creation, message approval, orchestration trigger | **Not built** |
 
 ## 6. Setup & running
 
@@ -201,7 +206,7 @@ uv sync                          # installs into .venv, Python 3.12 pinned
 cp .env.example .env             # fill in real secrets later; never commit .env
 docker compose up -d             # postgres:16 + redis:7
 uv run alembic upgrade head      # apply migrations
-uv run pytest                    # should be all green (170 tests as of this writing)
+uv run pytest                    # should be all green (172 tests as of this writing)
 ```
 
 Run a real scan (discovers, crawls, qualifies, persists to Postgres,
@@ -211,11 +216,15 @@ writes a CSV):
 uv run python scripts/run_pipeline.py targets/dentists-austin-tx.yaml leads.csv
 ```
 
-Review the result in a browser instead of the raw CSV:
+Review the result in a browser — either the CSV directly, or (now that
+it's persisted) the run's history entry:
 
 ```bash
 uv run uvicorn leadgen.api.review:app --reload
-# open http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-austin-tx.yaml
+# CSV-based, no DB needed:
+# http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-austin-tx.yaml
+# DB-based, every past run:
+# http://127.0.0.1:8000/runs
 ```
 
 If a dependency download times out, this network has a slow ramp-up on
@@ -223,20 +232,23 @@ large transfers, not a real block — retry with `UV_HTTP_TIMEOUT=240`.
 
 ## 7. Testing
 
-`uv run pytest` — 170 tests, all pure-function or mocked-`httpx`, zero
+`uv run pytest` — 172 tests, all pure-function or mocked-`httpx`, zero
 real network calls, zero real database. This is intentional and has a
 consequence worth knowing: two real modules
-(`db/repository.py`, `db/persist.py`) are **not exercised by this
-suite at all**, because `db/models.py` uses Postgres-specific
-`JSONB`/`UUID` column types that SQLite can't stand in for. Those are
-verified by hand against a real, migrated Postgres instead — see the
-"Verification" section at the bottom of docs/06 and docs/08 for what was
-actually run and what came back. Treat any change to those two files as
-unverified until you've done the same.
+(`db/repository.py`, `db/persist.py`) — and the `/runs`/`/runs/{id}`
+routes in `api/review.py` — are **not exercised by this suite at all**,
+because `db/models.py` uses Postgres-specific `JSONB`/`UUID` column types
+that SQLite can't stand in for. Those are verified by hand against a
+real, migrated Postgres instead — see the "Verification" section at the
+bottom of docs/06, docs/08, and docs/09 for what was actually run and
+what came back. Treat any change to those as unverified until you've done
+the same. (`_business_row_dict()`, the pure function that maps DB rows
+into the CSV-page's row-dict shape, *is* covered — see
+`test_business_row_dict_matches_csv_row_shape` in `test_review_api.py`.)
 
 Similarly, live network reachability (Overpass, Nominatim, real business
 websites, real Gmail) is confirmed by the manual verification runs
-recorded in docs/03, docs/06, docs/07, and docs/08 — not by the
+recorded in docs/03, docs/06, docs/07, docs/08, and docs/09 — not by the
 automated suite, which mocks all of it deliberately.
 
 ## 8. Hard rules (non-negotiable, enforced in code)
@@ -264,8 +276,8 @@ real send in a new region.
 ## 9. Current status (as of this writing)
 
 Build order steps 1–6 done; step 7 (bounce/reply) untouched; step 8
-(FastAPI + review UI) partially done — lead review exists, message
-approval doesn't.
+(FastAPI + review UI) partially done — lead review and run history exist,
+message approval doesn't.
 
 Real, verified — not just passing mocked tests:
 
@@ -273,16 +285,21 @@ Real, verified — not just passing mocked tests:
 - A real Gmail account authorized and a real email sent through it (HOWTO.md, docs/06)
 - The "read 200 rows by hand" checkpoint, at smaller volume (31 rows) than PROJECT.md's 200 (docs/07)
 - Pipeline → Postgres persistence, including a real bug (a multi-location chain colliding on `normalized_domain`) found and fixed on the first real run (docs/08)
+- The `/runs`/`/runs/{id}` run-history UI, including two real bugs a browser session (not the unit suite) caught: a `DetachedInstanceError` from reading an ORM attribute after its session closed, and FastAPI treating an empty-string `Form(...)` field as missing rather than empty (docs/09)
 
-Not built, in priority order:
+The three-UI-page plan the user asked for is: history/review (done,
+docs/09) → scan-builder form (next) → campaigns page. Not built, in
+priority order:
 
-1. **Orchestration**: `target_run` → `campaigns`/`messages` rows, then a
+1. **Scan-builder page**: a form that writes a `targets/*.yaml` file —
+   currently these are hand-edited only.
+2. **Orchestration**: `target_run` → `campaigns`/`messages` rows, then a
    loop calling `send/queue.py` + `send/gmail.py` against approved ones.
-2. **Message-approval UI** — needs #1 to exist first (nothing to approve
+3. **Message-approval UI** — needs #2 to exist first (nothing to approve
    without it).
-3. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+4. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
    the restricted `gmail.readonly`/`gmail.modify` scopes.
-4. Google Places as a second discover source (designed for in
+5. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

@@ -31,3 +31,6 @@ htmlcov/
 *.log
 .cache/
 leads*.csv
+
+# Playwright MCP browser-testing snapshots
+.playwright-mcp/

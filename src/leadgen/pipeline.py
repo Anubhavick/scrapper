@@ -24,6 +24,7 @@ from leadgen.config.models import BusinessTypeDef, TargetProfile
 from leadgen.db.persist import (
     create_target_run,
     finish_target_run,
+    record_run_business,
     upsert_business,
     upsert_contacts,
     upsert_signals,
@@ -114,9 +115,18 @@ def run_target_profile(
 
         for business in filtered:
             if not business.website_url:
+                row = _lead_row(business, contacts=[], signals={}, profile=profile)
                 if session is not None:
-                    upsert_business(session, business, business_type=profile.business_type)
-                rows.append(_lead_row(business, contacts=[], signals={}, profile=profile))
+                    db_business = upsert_business(session, business, business_type=profile.business_type)
+                    record_run_business(
+                        session,
+                        target_run.id,
+                        db_business.id,
+                        qualified=row.qualified,
+                        crawl_status=row.crawl_status,
+                        tags=row.tags.split(";") if row.tags else [],
+                    )
+                rows.append(row)
                 continue
 
             result = crawl_business(
@@ -127,20 +137,27 @@ def run_target_profile(
                 robots=robots,
                 user_agent=user_agent,
             )
+            row = _lead_row(
+                business,
+                result.contacts,
+                result.signals,
+                profile,
+                errors=result.errors,
+                pages_fetched=len(result.pages),
+            )
             if session is not None:
                 db_business = upsert_business(session, business, business_type=profile.business_type)
                 upsert_contacts(session, db_business.id, result.contacts, fetched_at)
                 upsert_signals(session, db_business.id, result.signals, fetched_at)
-            rows.append(
-                _lead_row(
-                    business,
-                    result.contacts,
-                    result.signals,
-                    profile,
-                    errors=result.errors,
-                    pages_fetched=len(result.pages),
+                record_run_business(
+                    session,
+                    target_run.id,
+                    db_business.id,
+                    qualified=row.qualified,
+                    crawl_status=row.crawl_status,
+                    tags=row.tags.split(";") if row.tags else [],
                 )
-            )
+            rows.append(row)
 
         if target_run is not None:
             finish_target_run(session, target_run.id, status="completed", businesses_found=len(rows))

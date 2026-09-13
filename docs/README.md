@@ -20,3 +20,4 @@ those two files distill from.
 | 6 | Gmail OAuth, compose, and send-queue decision logic (caps + suppression) | [06-gmail-oauth-and-send-queue.md](06-gmail-oauth-and-send-queue.md) |
 | 8 | Lead-review UI (scoped down), crawl_status/tag-dedup fixes from reading real data | [07-review-ui.md](07-review-ui.md) |
 | — | Postgres persistence: pipeline.py -> businesses/contacts/enrichment_signals/target_runs | [08-persistence.md](08-persistence.md) |
+| — | Run history UI: `/runs`, `/runs/{id}` -- browsing past scans from Postgres instead of a CSV | [09-run-history-ui.md](09-run-history-ui.md) |

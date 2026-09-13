@@ -41,18 +41,25 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   `JSONB`/`UUID` types don't work against SQLite, so these need a real
   migrated Postgres to verify (`docker compose up -d` + `alembic upgrade
   head`) — still unverified as of this writing.
-- `src/leadgen/api/review.py` — a FastAPI **lead-review** UI (docs/07):
-  filters a pipeline CSV by qualified/crawl_status/name, and a Reject
-  button that writes to a target profile's `exclude_domains`. Run with
+- `src/leadgen/api/review.py` — a FastAPI **lead-review + run-history**
+  UI (docs/07, docs/09): `/` filters a pipeline CSV by
+  qualified/crawl_status/name with a Reject button writing to a target
+  profile's `exclude_domains` — no DB dependency, still works for
+  `--no-db` runs. `/runs` lists every persisted `target_runs` row;
+  `/runs/{id}` is the same filterable table read from
+  `target_run_businesses`/`businesses`/`contacts` instead of a CSV — the
+  actual "history of previous scans" view. Both share the same
+  rendering/filter helpers via `_business_row_dict()`. Run with
   `uv run uvicorn leadgen.api.review:app --reload`. This is *not* the
   message-approval UI the hard rule "no send without a human clicking
   approve" needs — that needs `campaigns`/`messages` rows to review,
   which nothing creates yet (see the orchestration-loop gap below).
-- **Still not built, on purpose:** nothing turns a CSV of qualified leads
-  into `campaigns`/`messages` rows; nothing orchestrates reading approved
-  messages and actually calling `send/queue.py` + `send/gmail.py` against
-  them; no message-approval UI (needs the above to exist first);
-  bounce/reply monitoring (step 7, needs restricted
+- **Still not built, on purpose:** the scan-builder page (fill in a form,
+  get a target-profile YAML — currently hand-edited only); nothing turns
+  a qualified lead into `campaigns`/`messages` rows; nothing orchestrates
+  reading approved messages and actually calling `send/queue.py` +
+  `send/gmail.py` against them; no message-approval UI (needs the above
+  to exist first); bounce/reply monitoring (step 7, needs restricted
   `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
@@ -94,19 +101,29 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   `upsert_business()` now leaves the second one's `normalized_domain`
   null rather than crash the run; see docs/08 for why and its accepted
   nondeterminism (which location "wins" the slot depends on discover()
-  row order).
-- Postgres 16 + Redis via docker-compose, Alembic wired up (schema
-  exists and is migrated, just not written to by any code yet).
+  row order). Also writes one `target_run_businesses` row per business
+  (docs/09) with that run's own qualified/crawl_status/tags — a run's
+  verdict on a business, not the business's own attribute, since a
+  re-scan can change it.
+- Postgres 16 + Redis via docker-compose, Alembic wired up and actually
+  written to now (docs/08, docs/09) — `businesses`, `contacts`,
+  `enrichment_signals`, `target_runs`, `target_run_businesses`. `campaigns`
+  /`campaign_mailboxes`/`mailboxes`/`messages`/`suppressions` are migrated
+  but still unwritten.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step: campaigns. Turn a `target_run` into a `campaigns` row
-(offer + sender pool), generate `queued` `messages` rows for its
-qualified contacts via `compose/render.py` (already built), extend the
-review UI (or a new page) to let a human drop leads from the campaign and
-approve each rendered message, then the orchestration loop calling
-`send/queue.py` + `send/gmail.py` against approved ones. The hard rule
-about human approval has nothing to click until the first two pieces of
+Next concrete step (per the three-UI-page plan the user chose: history →
+scan-builder → campaigns; history is docs/09, done): the scan-builder
+page — a form that writes a `targets/*.yaml` file, matching what's
+currently only hand-editable. After that, campaigns: turn a `target_run`
+into a `campaigns` row (offer + sender pool), generate `queued`
+`messages` rows for its qualified contacts via `compose/render.py`
+(already built), extend the review UI (or a new page) to let a human
+drop leads from the campaign and approve each rendered message, then the
+orchestration loop calling `send/queue.py` + `send/gmail.py` against
+approved ones. The hard rule about human approval has nothing to click
+until the first two pieces of
 that exist.
 
 ## Commands

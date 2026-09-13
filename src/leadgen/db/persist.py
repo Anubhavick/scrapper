@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from leadgen.db.models import Business, Contact, EnrichmentSignal, TargetRun
+from leadgen.db.models import Business, Contact, EnrichmentSignal, TargetRun, TargetRunBusiness
 from leadgen.discover.overpass import DiscoveredBusiness
 from leadgen.enrich.signals import ContactCandidate
 from leadgen.util.domains import normalise_domain
@@ -21,6 +21,7 @@ __all__ = [
     "CONTACT_LEGAL_BASIS_PLACEHOLDER",
     "create_target_run",
     "finish_target_run",
+    "record_run_business",
     "upsert_business",
     "upsert_contacts",
     "upsert_signals",
@@ -150,6 +151,35 @@ def upsert_signals(
         else:
             row.value = {"value": value}
             row.fetched_at = fetched_at
+
+
+def record_run_business(
+    session: Session,
+    target_run_id,
+    business_id,
+    *,
+    qualified: bool,
+    crawl_status: str,
+    tags: list[str],
+) -> None:
+    """Links a business to the run that surfaced it, with that run's own
+    qualified/crawl_status/tags verdict -- see TargetRunBusiness's
+    docstring for why these live here and not on Business itself. One row
+    per (run, business); re-persisting the same run (shouldn't normally
+    happen -- a target_run isn't re-entrant) updates in place rather than
+    duplicating."""
+    row = session.execute(
+        select(TargetRunBusiness).where(
+            TargetRunBusiness.target_run_id == target_run_id,
+            TargetRunBusiness.business_id == business_id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = TargetRunBusiness(target_run_id=target_run_id, business_id=business_id)
+        session.add(row)
+    row.qualified = qualified
+    row.crawl_status = crawl_status
+    row.tags = tags
 
 
 def create_target_run(session: Session, target_name: str, profile_hash: str, profile_yaml: str) -> TargetRun:

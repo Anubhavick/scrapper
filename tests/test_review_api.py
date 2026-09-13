@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from leadgen.api.review import add_excluded_domain, app
+from leadgen.api.review import _business_row_dict, add_excluded_domain, app
+from leadgen.db.models import Business, TargetRunBusiness
 
 CSV_HEADER = "name,website_url,phone,address,emails,qualified,crawl_status,tags,signals\n"
 
@@ -100,6 +101,67 @@ def test_reject_adds_domain_and_redirects(tmp_path: Path, client: TestClient) ->
     assert resp.status_code == 303
     assert "rejected=not-a-dentist.example" in resp.headers["location"]
     assert "exclude_domains: [not-a-dentist.example]" in profile_path.read_text()
+
+
+def test_reject_works_with_empty_csv_field(tmp_path: Path, client: TestClient) -> None:
+    """Regression test: the /runs/{id} (DB-backed) page has no CSV to point
+    at, so it renders the reject form's hidden `csv` field as an empty
+    string. A live browser/curl check caught that FastAPI's `Form(...)`
+    treats an empty-string form value as *missing*, not empty -- 422,
+    not a render bug -- so `csv` must stay optional (Form("")) even
+    though the handler never reads it."""
+    profile_path = tmp_path / "profile.yaml"
+    _write_profile(profile_path)
+
+    resp = client.post(
+        "/reject",
+        data={
+            "name": "Some Business",
+            "domain": "example.com",
+            "csv": "",
+            "profile": str(profile_path),
+            "filter_qs": "qualified=all",
+            "return_to": "/runs/some-run-id",
+        },
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/runs/some-run-id?")
+
+
+def test_business_row_dict_matches_csv_row_shape() -> None:
+    """The DB-backed /runs/{id} page reuses `_row_html`/`_filtered`
+    unchanged from the CSV-backed `/` page -- this only works if
+    `_business_row_dict` produces the same key/value shape a CSV
+    DictReader row would."""
+    business = Business(
+        name="River Rock Dental",
+        business_type="dentist",
+        website_url="https://riverrockdentalfamily.com/locations/mueller/",
+        phone="+1-512-669-5147",
+        address="1801 East 51st Street, Austin, 78723",
+        source="overpass",
+        source_id="node/1",
+    )
+    run_business = TargetRunBusiness(
+        qualified=True,
+        crawl_status="ok",
+        tags=["platform-wordpress", "content-year-2024"],
+    )
+
+    row = _business_row_dict(business, ["front@riverrockdentalfamily.com"], run_business)
+
+    assert row == {
+        "name": "River Rock Dental",
+        "address": "1801 East 51st Street, Austin, 78723",
+        "website_url": "https://riverrockdentalfamily.com/locations/mueller/",
+        "phone": "+1-512-669-5147",
+        "emails": "front@riverrockdentalfamily.com",
+        "qualified": "yes",
+        "crawl_status": "ok",
+        "tags": "platform-wordpress;content-year-2024",
+    }
 
 
 def test_add_excluded_domain_is_idempotent(tmp_path: Path) -> None:

@@ -184,6 +184,44 @@ class TargetRun(Base):
     )
 
 
+class TargetRunBusiness(Base):
+    """Join row: which businesses turned up in which run, and that run's
+    qualified/crawl_status/tags verdict for it. These three are properties
+    of *a run's crawl* of a business, not of the business itself — the
+    same business re-crawled in a later run can flip qualified or heal an
+    `unreachable` crawl_status, and businesses.* stays the current
+    snapshot either way. Without this table a target_run's businesses_found
+    is just a count with nothing to page back through — this is what makes
+    "history" actually queryable instead of only re-derivable from a CSV
+    nobody kept."""
+
+    __tablename__ = "target_run_businesses"
+
+    id: Mapped[uuid.UUID] = _pk()
+    target_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("target_runs.id", ondelete="CASCADE")
+    )
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("businesses.id", ondelete="CASCADE")
+    )
+
+    qualified: Mapped[bool]
+    crawl_status: Mapped[str]
+    tags: Mapped[list | None] = mapped_column(JSONB)
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "target_run_id", "business_id", name="uq_target_run_businesses_run_business"
+        ),
+        CheckConstraint(
+            "crawl_status IN ('ok', 'partial', 'unreachable', 'no_website')",
+            name="ck_target_run_businesses_crawl_status",
+        ),
+    )
+
+
 class Campaign(Base):
     """A target run's leads, paired with an offer and a sender pool."""
 
