@@ -22,3 +22,4 @@ those two files distill from.
 | — | Postgres persistence: pipeline.py -> businesses/contacts/enrichment_signals/target_runs | [08-persistence.md](08-persistence.md) |
 | — | Run history UI: `/runs`, `/runs/{id}` -- browsing past scans from Postgres instead of a CSV | [09-run-history-ui.md](09-run-history-ui.md) |
 | — | Scan-builder UI: `/targets`, `/targets/new`, `/targets/{name}` -- a form that writes targets/*.yaml | [10-scan-builder-ui.md](10-scan-builder-ui.md) |
+| — | Campaigns + message approval: `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- target_run -> campaign -> rendered, human-approved messages | [11-campaigns-and-message-approval.md](11-campaigns-and-message-approval.md) |

@@ -104,20 +104,22 @@ target profile (YAML)
       ▼
 [3] QUALIFY   ──► sendable leads      (rules from the profile)
       ▼
-[4] COMPOSE   ──► drafts              (template + one generated line)      ← built, not wired up
+[4] COMPOSE   ──► drafts              (template + one generated line)      ← wired up via campaigns (docs/11)
       ▼
-[5] REVIEW    ──► human approval      (mandatory)                          ← lead-review UI exists; message-approval UI doesn't
+[5] REVIEW    ──► human approval      (mandatory)                          ← /campaigns/{id} (docs/11)
       ▼
-[6] SEND      ──► Gmail API, capped, randomised delays                     ← built, not wired up
+[6] SEND      ──► Gmail API, capped, randomised delays                     ← built, not wired up (no orchestration loop yet)
       ▼
 [7] MONITOR   ──► replies/bounces/unsubscribes → permanent suppression     ← not built
 ```
 
-Stages 1–3 are wired together today by `leadgen.pipeline.
-run_target_profile()`, callable via `scripts/run_pipeline.py`. Stages 4
-and 6 exist as tested building blocks (`compose/`, `send/`) that nothing
-yet calls in sequence — that's the actual next piece of work, not a
-missing capability (see §7).
+Stages 1–5 are wired together today: 1–3 by `leadgen.pipeline.
+run_target_profile()` (`scripts/run_pipeline.py`), 4–5 by
+`db/campaigns.py` + `api/campaigns.py` (docs/11) — a human can go from a
+target profile to an approved, exactly-as-will-be-sent message entirely
+through the UI. Stage 6 (`send/`) is a tested building block nothing
+calls yet — the orchestration loop is the actual next piece of work, not
+a missing capability (see §9).
 
 ### 3.3 Where persistence fits (added after step 5, see docs/08)
 
@@ -140,15 +142,22 @@ that's gone the moment you overwrite it. The run-history view itself —
 `/runs` and `/runs/{id}` in `api/review.py`, reading exactly these
 tables instead of a CSV — is docs/09.
 
-### 3.4 Where the database ends and campaigns begin (not built yet)
+### 3.4 Campaigns and message approval (docs/11)
 
-`campaigns` and `messages` exist in the schema and are migrated, but
-nothing writes to them. The intended flow, once built: pick a
-`target_run` + an offer + a sender pool → create a `campaigns` row →
-render one `messages` row per qualified contact via
-`compose/render.py` (already built) → a human approves each rendered
-message → an orchestration loop calls `send/queue.py` +
-`send/gmail.py` against approved ones, respecting caps/suppression/delay.
+`api/campaigns.py` + `db/campaigns.py`: pick a completed `target_run` +
+an offer + a sender pool (real, authorized `mailboxes` only) →
+`create_campaign()` makes the `campaigns` row → `generate_campaign_messages()`
+renders one `queued` `messages` row per **qualified business** (not per
+contact — `_select_best_contact()` picks one address per business,
+preferring a named one over a generic `info@`-style one) via
+`compose/render.py` (already built, untouched) → a human reads the full
+rendered text and clicks Approve or Reject at `/campaigns/{id}`,
+required to type a name first so `approved_by` means something.
+
+**Still not built:** the orchestration loop that reads `status='approved'`
+messages and actually calls `send/queue.py` + `send/gmail.py` against
+them, respecting caps/suppression/the 90-600s delay. Nothing in
+`api/campaigns.py` sends anything — see §9's roadmap.
 
 ## 4. Data model
 
@@ -193,10 +202,12 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `db/models.py` | Full SQLAlchemy schema | Done, migrated |
 | `compose/render.py` | Renders subject + one generated line from an offer template, grounded in a real signal | Done, tested. Raises rather than fabricating a generic line if no relevant signal is actually true |
 | `send/{crypto,oauth,gmail,caps,suppression,queue}.py` | Refresh-token encryption, Gmail OAuth flow (`gmail.send` only), MIME + actual send call, cap/suppression/delay decision logic | Done, tested; **verified against a real Gmail account** (a real message was sent and received) |
-| `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done. Message-approval UI is a separate, unbuilt piece |
+| `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done |
 | `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
-| `api/nav.py` | Shared top-nav strip across all three pages | Done |
-| `api/` (rest) | Campaign creation, message approval, orchestration trigger | **Not built** |
+| `db/campaigns.py` | `create_campaign()` + `generate_campaign_messages()` -- turns a target_run's qualified leads into a campaign + one rendered message per business | Done, verified against real Postgres |
+| `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- read the full rendered text, Approve or Reject. Sends nothing itself | Done |
+| `api/nav.py` | Shared top-nav strip across all four pages | Done |
+| `api/` (rest) | Orchestration trigger (reads `approved` messages, calls `send/queue.py` + `send/gmail.py`) | **Not built** |
 
 ## 6. Setup & running
 
@@ -208,7 +219,7 @@ uv sync                          # installs into .venv, Python 3.12 pinned
 cp .env.example .env             # fill in real secrets later; never commit .env
 docker compose up -d             # postgres:16 + redis:7
 uv run alembic upgrade head      # apply migrations
-uv run pytest                    # should be all green (188 tests as of this writing)
+uv run pytest                    # should be all green (191 tests as of this writing)
 ```
 
 Build a new target profile without hand-editing YAML, or browse the ones
@@ -222,13 +233,16 @@ uv run python scripts/run_pipeline.py targets/dentists-austin-tx.yaml leads.csv
 ```
 
 Review the result in a browser — either the CSV directly, or (now that
-it's persisted) the run's history entry:
+it's persisted) the run's history entry — then, once a run has qualified
+leads, turn them into an approvable campaign:
 
 ```bash
 # CSV-based, no DB needed:
 # http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-austin-tx.yaml
 # DB-based, every past run:
 # http://127.0.0.1:8000/runs
+# Campaigns: pick a run + offer + sender pool, approve rendered messages one by one:
+# http://127.0.0.1:8000/campaigns/new
 ```
 
 If a dependency download times out, this network has a slow ramp-up on
@@ -236,7 +250,7 @@ large transfers, not a real block — retry with `UV_HTTP_TIMEOUT=240`.
 
 ## 7. Testing
 
-`uv run pytest` — 188 tests, all pure-function or mocked-`httpx`, zero
+`uv run pytest` — 191 tests, all pure-function or mocked-`httpx`, zero
 real network calls, zero real database. This is intentional and has a
 consequence worth knowing: two real modules
 (`db/repository.py`, `db/persist.py`) — and the `/runs`/`/runs/{id}`
@@ -287,8 +301,9 @@ real send in a new region.
 ## 9. Current status (as of this writing)
 
 Build order steps 1–6 done; step 7 (bounce/reply) untouched; step 8
-(FastAPI + review UI) partially done — lead review, run history, and the
-scan-builder form exist, message approval doesn't.
+(FastAPI UI) done in substance — lead review, run history, scan-builder,
+campaigns, and message approval all exist; only the orchestration loop
+that actually sends an approved message is missing.
 
 Real, verified — not just passing mocked tests:
 
@@ -298,18 +313,23 @@ Real, verified — not just passing mocked tests:
 - Pipeline → Postgres persistence, including a real bug (a multi-location chain colliding on `normalized_domain`) found and fixed on the first real run (docs/08)
 - The `/runs`/`/runs/{id}` run-history UI, including two real bugs a browser session (not the unit suite) caught: a `DetachedInstanceError` from reading an ORM attribute after its session closed, and FastAPI treating an empty-string `Form(...)` field as missing rather than empty (docs/09)
 - The `/targets` scan-builder UI: a real profile created through the form round-tripped through the actual `load_target_profile()` loader correctly typed, and create-only (never-overwrite) + filename-sanitisation behavior confirmed both by browser testing and by dedicated tests (docs/10)
+- The `/campaigns` + message-approval UI: a real campaign built from a real 6-qualified-lead run, all 6 messages rendered with correctly grounded text and addressed to each business's best contact, approve/reject verified end to end including the "must type a name to approve" guard — plus the same `DetachedInstanceError` class of bug as docs/09, caught the same way and fixed the same way (docs/11)
 
-The three-UI-page plan the user asked for is: history/review (docs/09,
-done) → scan-builder form (docs/10, done) → campaigns page (next). Not
-built, in priority order:
+The three-UI-page plan the user asked for is done: history/review
+(docs/09) → scan-builder (docs/10) → campaigns + message approval
+(docs/11). Not built, in priority order:
 
-1. **Orchestration**: `target_run` → `campaigns`/`messages` rows, then a
-   loop calling `send/queue.py` + `send/gmail.py` against approved ones.
-2. **Message-approval UI** — needs #1 to exist first (nothing to approve
-   without it).
-3. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+1. **The orchestration loop** — the one piece left before this system can
+   send a real campaign. Reads `messages` where `status='approved'` and
+   calls `send/queue.py`'s `send_next()` against each (already correctly
+   ordered: sleep the gap, re-check fresh state, then send), using
+   `db/repository.py`'s advisory-lock `reserve_send_slot()` so concurrent
+   runs can't both see "under cap." This is real, external,
+   hard-to-reverse behavior once pointed at a real campaign — test
+   against mocked/dry-run sends first.
+2. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
    the restricted `gmail.readonly`/`gmail.modify` scopes.
-4. Google Places as a second discover source (designed for in
+3. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

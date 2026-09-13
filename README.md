@@ -15,16 +15,18 @@ this codebase: [CLAUDE.md](CLAUDE.md). A running build log, one file per
 completed step with the reasoning behind every non-obvious decision:
 [docs/](docs/).
 
-## Status: build order steps 1–6 done, step 8 partial, out of 9
+## Status: build order steps 1–6 done, step 8 done, out of 9
 
 **Discover → enrich → CSV/Postgres is a real, runnable, and now
 persisted pipeline (steps 1–5, plus DB persistence added afterward).
 Step 6 added the Gmail OAuth flow, message composition, and the
 send-queue decision logic — verified end-to-end against a real Gmail
-account (a real message was actually sent and received). A minimal
-lead-review UI exists (part of step 8). What's still missing is the
-orchestration loop connecting a reviewed lead list to an actual approved
-send, and the message-approval UI that has to sit in front of it.**
+account (a real message was actually sent and received). Step 8's full
+web UI now exists: browse/create target profiles, browse run history,
+and — as of the latest piece — build a campaign from a completed run and
+approve each rendered message by hand. What's still missing is the
+orchestration loop that reads an approved message and actually sends
+it — the one piece standing between this system and a real campaign.**
 
 **Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
 hard gate — read 200 rows by hand *before* building anything past it,
@@ -38,12 +40,14 @@ that review, on direct instruction — see
 
 What's done:
 
-- Postgres 16 + Redis via Docker Compose; full schema (10 tables),
+- Postgres 16 + Redis via Docker Compose; full schema (11 tables),
   migrated with Alembic. **Now actually written to** —
-  `businesses`/`contacts`/`enrichment_signals`/`target_runs` are
-  populated by every persistence-enabled pipeline run (see
-  [docs/08](docs/08-persistence.md)); `campaigns`/`messages` are still
-  untouched.
+  `businesses`/`contacts`/`enrichment_signals`/`target_runs`/
+  `target_run_businesses` are populated by every persistence-enabled
+  pipeline run (docs/08, docs/09); `campaigns`/`campaign_mailboxes`/
+  `messages` are populated by the campaigns UI (docs/11). `mailboxes` is
+  written separately by `scripts/authorize_mailbox.py`; `suppressions`
+  is migrated but still unwritten.
 - `normalise_domain()` — the domain-dedup function everything else
   depends on
 - A Pydantic-validated config loader for target profiles, business
@@ -66,10 +70,13 @@ What's done:
   `platform-wordpress`, `content-year-2019`, …) and a `crawl_status`
   (`ok`/`partial`/`unreachable`/`no_website`) so a dead site can't be
   mistaken for one with genuinely empty signals.
-- **Review UI**: `leadgen.api.review` — a small FastAPI app to filter a
-  run's leads and reject bad OSM matches with one click
-  (`uv run uvicorn leadgen.api.review:app --reload`). Doesn't yet do
-  message approval — see docs/07.
+- **Web UI**: one FastAPI app (`uv run uvicorn leadgen.api.review:app
+  --reload`) covering all of step 8: `/` filters a pipeline CSV and
+  rejects bad OSM matches with one click (docs/07); `/targets` browses
+  and creates target profiles from a form instead of hand-editing YAML
+  (docs/10); `/runs`/`/runs/{id}` browses every past scan from Postgres
+  (docs/09); `/campaigns` turns a completed run's qualified leads into
+  rendered messages a human approves or rejects one by one (docs/11).
 - **Compose**: `leadgen.compose.render.render_message()` fills an offer's
   subject/body template with one generated line grounded in a real
   boolean signal (e.g. "no online booking found")
@@ -81,19 +88,25 @@ What's done:
   **Verified against a real Gmail account** — `scripts/authorize_
   mailbox.py` + `scripts/send_test_email.py` sent and received a real
   message. **Nothing orchestrates these into an actual send loop yet.**
-- 170 passing tests, all against mocked HTTP, pure functions, or static
+- **Campaigns**: `leadgen.db.campaigns` + `leadgen.api.campaigns` — turn
+  a completed target run's qualified leads into a `campaigns` row and
+  one rendered `messages` row per business (addressed to its best
+  contact — a named address preferred over a generic `info@`-style one),
+  then approve or reject each one at `/campaigns/{id}`, full rendered
+  text visible, approving requires typing a name first. Verified for
+  real against a live Postgres run (docs/11).
+- 191 passing tests, all against mocked HTTP, pure functions, or static
   fixtures — no real network calls in the test suite itself (real
   verification runs, listed above, were separate manual steps)
 
 What's not done, and things worth knowing before trusting this against
 real data or a real send:
 
-- **No orchestration loop and no message-approval UI.** Nothing turns a
-  `target_run` into a `campaigns`/`messages` row, nothing loops over
-  approved messages calling `send.queue`/`send.gmail`, and there's
-  nothing to click "approve" on a rendered message yet — so the hard
-  rule "no send without human approval" has nothing to click. This is
-  the actual next piece of work.
+- **No orchestration loop.** There is now a real `messages` row with
+  `status='approved'` sitting in Postgres and nothing reads it — nothing
+  loops over approved messages calling `send.queue`/`send.gmail` yet.
+  This is the actual next piece of work, and the last one before a real
+  send is possible.
 - Bounce/reply monitoring (step 7) doesn't exist — needs the restricted
   `gmail.readonly`/`gmail.modify` scopes and a Google CASA review.
 - **Qualification has a documented, partially-closed gap.** Non-boolean
@@ -150,13 +163,18 @@ result in a browser instead of a raw file:
 
 ```bash
 uv run uvicorn leadgen.api.review:app --reload
-# open http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-gurugram.yaml
+# CSV, no DB needed:
+# http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-gurugram.yaml
+# every past run, from Postgres:
+# http://127.0.0.1:8000/runs
 ```
 
 This is the "read 200 rows by hand" checkpoint from PROJECT.md's build
 order — actually read the leads before trusting qualification, and
-before anything past the review/campaign stage gets built for a new
-target profile you haven't run yet.
+before building a campaign from a target profile you haven't run before.
+Once a run has qualified leads, `/campaigns/new` turns them into rendered
+messages you approve or reject one by one — nothing is sent by doing
+this; see "How sending automation works" below.
 
 ## How the pipeline is designed to work
 
@@ -188,11 +206,11 @@ target profile (YAML)
       ▼
 [3] QUALIFY   ──► sendable leads      (rules from the profile)
       ▼
-[4] COMPOSE   ──► drafts              (template + one generated line)
+[4] COMPOSE   ──► drafts              (template + one generated line)      -- wired up via campaigns
       ▼
-[5] REVIEW    ──► human approval      (mandatory — nothing skips this)
+[5] REVIEW    ──► human approval      (mandatory — nothing skips this)     -- /campaigns/{id}
       ▼
-[6] SEND      ──► Gmail API, capped, randomised delays
+[6] SEND      ──► Gmail API, capped, randomised delays                    -- built, no orchestration loop yet
       ▼
 [7] MONITOR   ──► replies / bounces / unsubscribes → permanent suppression
 ```
@@ -234,7 +252,7 @@ before building anything past this point** — the point is to find out
 whether the data is good enough to justify building the sending half at
 all. That hand-review is a human task now, not a build step.
 
-### How sending automation works — building blocks done, not wired up yet
+### How sending automation works — approval built, orchestration not wired up yet
 
 - Each **mailbox** (a team member's own Gmail account) authenticates via
   OAuth (`leadgen.send.oauth`, `gmail.send` scope only); the refresh
@@ -242,13 +260,13 @@ all. That hand-review is a human task now, not a build step.
   git or logs.
 - A **campaign** pairs a completed target run with an offer (the pitch,
   also YAML — `config/offers/*.yaml`) and a pool of sender mailboxes —
-  the DB tables exist and are migrated, but nothing yet creates these
-  rows from a CSV of qualified leads.
+  built via `/campaigns/new`, which also generates one rendered message
+  per qualified business in that run (docs/11).
 - **Compose** (`leadgen.compose.render.render_message()`) renders a
   subject + one generated line per lead from the offer's template,
   grounded in that business's actual signals — no message is sent
-  without a human clicking approve on the exact rendered text first
-  (there's no UI to click yet — see below).
+  without a human clicking approve on the exact rendered text first, at
+  `/campaigns/{id}` (docs/11).
 - **Send** enforces, in code, not config, via `leadgen.send.queue` +
   `leadgen.send.gmail`:
   - max 50 emails per mailbox per day (`send.caps.can_send()`)
@@ -270,13 +288,13 @@ all. That hand-review is a human task now, not a build step.
   legal advice — verify before the first real send.**
 
 **What's missing to actually send anything**: an orchestration loop that
-turns a `target_run` into `campaigns`/`messages` rows and then reads
-approved ones, calling the pieces above in order; and the
-message-approval UI (part of step 8) for the human-approval hard rule —
-`leadgen.api.review` today only reviews *leads*, not rendered messages.
-Real Google OAuth credentials and a `TOKEN_ENCRYPTION_KEY` already exist
-and have been verified against a real account (HOWTO.md, docs/06) — that
-part is no longer a blocker.
+reads `messages` rows with `status='approved'` and calls the pieces
+above in order for each one, respecting the daily cap and the randomised
+delay. Everything upstream of it — campaign creation, message rendering,
+human approval — is built and verified (docs/11). Real Google OAuth
+credentials and a `TOKEN_ENCRYPTION_KEY` already exist and have been
+verified against a real account (HOWTO.md, docs/06) — that part is no
+longer a blocker either.
 
 ## Project layout
 
@@ -291,10 +309,13 @@ src/leadgen/
               (implemented, verified against a real account; nothing
               orchestrates these into a send loop yet)
   db/         SQLAlchemy models; session + send-side queries; persist.py
-              (business/contact/signal/target_run upserts) — all implemented,
-              verified against a real Postgres (docs/08)
-  api/        FastAPI lead-review UI (implemented, docs/07); message-approval
-              UI (not yet implemented)
+              (business/contact/signal/target_run upserts, docs/08);
+              campaigns.py (campaign + message generation, docs/11) —
+              all implemented, verified against a real Postgres
+  api/        FastAPI web UI: lead review (docs/07), scan-builder
+              (docs/10), run history (docs/09), campaigns + message
+              approval (docs/11) — all implemented. Orchestration
+              (actually sending an approved message) is not.
   util/       normalise_domain() and friends (implemented)
 alembic/      migrations
 config/       business_types.yaml, offers/*.yaml (example data)

@@ -50,10 +50,7 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   `target_run_businesses`/`businesses`/`contacts` instead of a CSV — the
   actual "history of previous scans" view. Both share the same
   rendering/filter helpers via `_business_row_dict()`. Run with
-  `uv run uvicorn leadgen.api.review:app --reload`. This is *not* the
-  message-approval UI the hard rule "no send without a human clicking
-  approve" needs — that needs `campaigns`/`messages` rows to review,
-  which nothing creates yet (see the orchestration-loop gap below).
+  `uv run uvicorn leadgen.api.review:app --reload`.
 - `src/leadgen/api/targets.py` — a FastAPI **scan-builder** UI (docs/10),
   mounted onto the same `app`: `/targets` lists every `targets/*.yaml`
   (parsed through the real loader, so a bad business_type/offer_id
@@ -67,16 +64,30 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   overwritten. `name` is sanitised as a filename
   (`^[a-z0-9][a-z0-9-]{0,62}$`) since it becomes one — this is what
   blocks path-traversal input, not just a "looks like a slug" nicety.
-  `src/leadgen/api/nav.py` is the shared nav bar across all three pages.
+  `src/leadgen/api/nav.py` is the shared nav bar across all four pages.
+- `src/leadgen/db/campaigns.py` + `src/leadgen/api/campaigns.py` — a
+  FastAPI **campaigns + message-approval** UI (docs/11), mounted onto the
+  same `app`. `create_campaign()` turns a completed `target_run` + an
+  offer + a sender pool (real, authorized `mailboxes` rows only) into a
+  `campaigns` row; `generate_campaign_messages()` renders one `queued`
+  `messages` row per qualified business via `compose/render.py`
+  (already built, untouched) — one message per **business**, not per
+  contact, addressed to its best contact (`_select_best_contact()`
+  prefers a named address over a generic `info@`-style one). `/campaigns`
+  lists campaigns with a status breakdown; `/campaigns/new` creates one;
+  `/campaigns/{id}` is the actual approval screen the hard rule "no send
+  without a human clicking approve" needed — full rendered subject/body,
+  Approve/Reject per message, approving requires typing a name first
+  (`approved_by` unaudited otherwise). **Sends nothing** — no route here
+  calls `send/queue.py`/`send/gmail.py`; that's the orchestration loop,
+  still not built (below).
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
-  footgun, and doing it properly is the orchestration-loop work below,
-  not this page's); nothing turns a qualified lead into
-  `campaigns`/`messages` rows; nothing orchestrates reading approved
-  messages and actually calling `send/queue.py` + `send/gmail.py` against
-  them; no message-approval UI (needs the above to exist first);
-  bounce/reply monitoring (step 7, needs restricted
+  footgun); nothing orchestrates reading `approved` messages and actually
+  calling `send/queue.py` + `send/gmail.py` against them, respecting the
+  90–600s gap and re-checking suppression/caps immediately before each
+  send; bounce/reply monitoring (step 7, needs restricted
   `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
@@ -110,9 +121,7 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   `target_runs` row as it goes, via `src/leadgen/db/persist.py`. Without
   a session it's unchanged — CSV-only, no DB dependency.
   `scripts/run_pipeline.py` persists by default now; `--no-db` reverts
-  to the old behaviour. `campaigns`/`messages` are still untouched —
-  nothing yet turns a `target_run` into something a human approves.
-  **Real bug worth knowing:** `businesses.normalized_domain`'s partial
+  to the old behaviour. **Real bug worth knowing:** `businesses.normalized_domain`'s partial
   unique index breaks on a real multi-location chain sharing one domain
   (two actual "River Rock Dental" branches in the Austin data) —
   `upsert_business()` now leaves the second one's `normalized_domain`
@@ -123,23 +132,30 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   verdict on a business, not the business's own attribute, since a
   re-scan can change it.
 - Postgres 16 + Redis via docker-compose, Alembic wired up and actually
-  written to now (docs/08, docs/09) — `businesses`, `contacts`,
-  `enrichment_signals`, `target_runs`, `target_run_businesses`. `campaigns`
-  /`campaign_mailboxes`/`mailboxes`/`messages`/`suppressions` are migrated
-  but still unwritten.
+  written to now (docs/08, docs/09, docs/11) — `businesses`, `contacts`,
+  `enrichment_signals`, `target_runs`, `target_run_businesses`,
+  `campaigns`, `campaign_mailboxes`, `messages`. `mailboxes` is written to
+  separately by `scripts/authorize_mailbox.py` (HOWTO.md). `suppressions`
+  is migrated but still unwritten — needs stage 7's bounce/reply handling
+  or a manual insert.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step (per the three-UI-page plan the user chose: history →
-scan-builder → campaigns; both history (docs/09) and scan-builder
-(docs/10) are done): campaigns. Turn a `target_run` into a `campaigns`
-row (offer + sender pool), generate `queued` `messages` rows for its
-qualified contacts via `compose/render.py` (already built), extend the
-review UI (or a new page) to let a human drop leads from the campaign and
-approve each rendered message, then the orchestration loop calling
-`send/queue.py` + `send/gmail.py` against approved ones. The hard rule
-about human approval has nothing to click until the first two pieces of
-that exist.
+Next concrete step: the orchestration loop. All three UI pages the user
+asked for are done (history docs/09, scan-builder docs/10, campaigns +
+message approval docs/11) — there is now a real `messages` row with
+`status='approved'` sitting in Postgres with nothing that reads it. Build
+a process that queries `messages` where `status='approved'` and, for
+each one, calls `send/queue.py`'s `send_next()` (already implements the
+correct order: sleep the randomised 90-600s gap first, then re-fetch
+fresh suppression/cap state, then send), wrapping its `sent_today_fn`
+around `db/repository.py`'s `reserve_send_slot()` (the advisory-lock
+version, not a standalone `count_sent_today`) so two concurrent runs
+can't both observe "under cap." On success, transition the row to `sent`
+and set `sent_at`/`gmail_message_id`/`gmail_thread_id`. This is real,
+external, hard-to-reverse behavior -- build and test it against
+mocked/dry-run sends first, and do not point it at a real approved
+campaign without explicit confirmation.
 
 ## Commands
 

@@ -77,7 +77,7 @@ _DEFAULT_VALUES: dict = {
 }
 
 
-def _load_registries() -> tuple[dict, dict, list[str]]:
+def load_registries() -> tuple[dict, dict, list[str]]:
     """Business types and offers, read fresh each request (cheap, small
     files) so a config edit shows up without restarting the server.
     Returns (business_types, offers, load_errors)."""
@@ -496,7 +496,7 @@ def _render_show(name: str, raw_text: str, profile: TargetProfile | None, error:
 @router.get("/targets", response_class=HTMLResponse)
 def list_targets(created: str = "") -> HTMLResponse:
     files = sorted(TARGETS_DIR.glob("*.yaml")) if TARGETS_DIR.is_dir() else []
-    business_types, offers, _load_errors = _load_registries()
+    business_types, offers, _load_errors = load_registries()
 
     rows: list[tuple[str, TargetProfile | None, str | None]] = []
     for path in files:
@@ -513,7 +513,7 @@ def list_targets(created: str = "") -> HTMLResponse:
 
 @router.get("/targets/new", response_class=HTMLResponse)
 def new_target_form(from_: str = Query("", alias="from")) -> HTMLResponse:
-    business_types, offers, load_errors = _load_registries()
+    business_types, offers, load_errors = load_registries()
     values = dict(_DEFAULT_VALUES)
 
     if from_ and _NAME_RE.match(from_):
@@ -541,7 +541,7 @@ async def create_target(request: Request) -> HTMLResponse:
             "(e.g. dentists-austin-tx)."
         )
 
-    business_types, offers, load_errors = _load_registries()
+    business_types, offers, load_errors = load_registries()
     errors.extend(load_errors)
 
     profile: TargetProfile | None = None
@@ -587,7 +587,7 @@ def show_target(name: str, created: str = "") -> HTMLResponse:
         return HTMLResponse(f"<p>No target profile named {escape(name)}</p>", status_code=404)
 
     raw_text = path.read_text()
-    business_types, offers, _load_errors = _load_registries()
+    business_types, offers, _load_errors = load_registries()
 
     profile: TargetProfile | None = None
     error: str | None = None

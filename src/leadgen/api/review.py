@@ -33,6 +33,7 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
+from leadgen.api.campaigns import router as campaigns_router
 from leadgen.api.nav import nav_bar
 from leadgen.api.targets import router as targets_router
 from leadgen.db.models import Business, Contact, TargetRun, TargetRunBusiness
@@ -41,6 +42,7 @@ from leadgen.util.domains import normalise_domain
 
 app = FastAPI(title="Lead Review")
 app.include_router(targets_router)
+app.include_router(campaigns_router)
 
 CRAWL_STATUSES = ["ok", "partial", "unreachable", "no_website"]
 DEFAULT_CSV = "leads-austin-dentists.csv"

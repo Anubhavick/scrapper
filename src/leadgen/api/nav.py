@@ -7,6 +7,7 @@ from __future__ import annotations
 _PAGES = [
     ("/targets", "Targets"),
     ("/runs", "Run history"),
+    ("/campaigns", "Campaigns"),
     ("/", "Lead review (CSV)"),
 ]
 
