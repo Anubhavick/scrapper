@@ -6,7 +6,7 @@ business_type: dentist
 location:
   mode: radius
   center: "Austin, Texas, USA"
-  radius_km: 3
+  radius_km: 15
 
 source:
   primary: overpass
@@ -16,6 +16,12 @@ filters:
   must_have_website: true
   must_have_phone: false
   min_name_length: 3
+  # OSM tags this node `dentist`, but touchto.io is a digital agency, not a
+  # dental practice -- caught during the manual review of a real scrape.
+  # No cross-source validation exists to catch mistagged OSM nodes
+  # automatically, so this is a per-profile denylist maintained by hand
+  # (or, once step 8's review UI exists, by clicking "reject").
+  exclude_domains: [touchto.io]
 
 enrichment:
   crawl_pages: [/, /contact, /about, /services]

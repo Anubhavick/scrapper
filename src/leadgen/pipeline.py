@@ -27,7 +27,17 @@ from leadgen.enrich.robots import RobotsChecker
 from leadgen.enrich.signals import ContactCandidate
 from leadgen.enrich.tags import compute_tags
 
-CSV_FIELDS = ["name", "website_url", "phone", "address", "emails", "qualified", "tags", "signals"]
+CSV_FIELDS = [
+    "name",
+    "website_url",
+    "phone",
+    "address",
+    "emails",
+    "qualified",
+    "crawl_status",
+    "tags",
+    "signals",
+]
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,7 @@ class LeadRow:
     address: str | None
     emails: str
     qualified: bool
+    crawl_status: str
     tags: str
     signals: str
 
@@ -49,6 +60,7 @@ class LeadRow:
             "address": self.address or "",
             "emails": self.emails,
             "qualified": "yes" if self.qualified else "no",
+            "crawl_status": self.crawl_status,
             "tags": self.tags,
             "signals": self.signals,
         }
@@ -85,10 +97,32 @@ def run_target_profile(
             user_agent=user_agent,
         )
         rows.append(
-            _lead_row(business, result.contacts, result.signals, profile, errors=result.errors)
+            _lead_row(
+                business,
+                result.contacts,
+                result.signals,
+                profile,
+                errors=result.errors,
+                pages_fetched=len(result.pages),
+            )
         )
 
     return rows
+
+
+def _crawl_status(has_website: bool, errors: list[str], pages_fetched: int) -> str:
+    """One word a human filtering the CSV can act on directly, instead of
+    parsing the tags string for 'error-' substrings. 'unreachable' means
+    every crawl attempt failed, so `signals`/`tags` for that row reflect
+    nothing about the real site — qualification correctly can't use them,
+    and a reviewer shouldn't read absence-of-signals as a good sign."""
+    if not has_website:
+        return "no_website"
+    if errors and pages_fetched == 0:
+        return "unreachable"
+    if errors:
+        return "partial"
+    return "ok"
 
 
 def _lead_row(
@@ -97,8 +131,12 @@ def _lead_row(
     signals: dict[str, object],
     profile: TargetProfile,
     errors: list[str] | None = None,
+    pages_fetched: int = 0,
 ) -> LeadRow:
-    tags = compute_tags(has_website=business.website_url is not None, signals=signals) + (errors or [])
+    errors = errors or []
+    tags = list(
+        dict.fromkeys(compute_tags(has_website=business.website_url is not None, signals=signals) + errors)
+    )
     return LeadRow(
         name=business.name,
         website_url=business.website_url,
@@ -106,6 +144,7 @@ def _lead_row(
         address=business.address,
         emails=";".join(c.email for c in contacts),
         qualified=is_qualified(profile, contacts, signals),
+        crawl_status=_crawl_status(business.website_url is not None, errors, pages_fetched),
         tags=";".join(tags),
         signals=json.dumps(signals, sort_keys=True),
     )
