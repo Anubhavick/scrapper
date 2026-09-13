@@ -49,6 +49,19 @@ rendered text" something to actually click.
     through the URL (`?approver=...`) so it doesn't need retyping per
     row while working through a list.
   - `nav.py` gained a fourth link ("Campaigns").
+  - `POST /campaigns/{id}/messages/{message_id}/edit` (added after the
+    user pointed out real campaigns need per-business tweaks, not just
+    accept/reject on the template output verbatim) — while a message is
+    still `queued`, its subject/body render as editable fields instead of
+    a read-only `<details>` block, with a "Save changes" button. Refuses
+    to edit anything not `queued`: once approved, `messages.subject`/
+    `body` is the record of exactly what text a human signed off on
+    (CLAUDE.md's schema-decisions note on why `messages` stores rendered
+    text, not a template reference) — allowing an edit after approval
+    would make that record describe a message that was never actually
+    approved. Verified this refusal for real: a raw POST to an already-
+    approved message's edit endpoint left `status`/`subject` completely
+    unchanged.
 
 ## Two real bugs a browser session caught (same class as docs/09's)
 
@@ -84,11 +97,18 @@ rendered text" something to actually click.
   — an irreversible, externally-visible action — and building +
   personally triggering it are being kept as two separate, separately
   authorized steps.
-- **No edit or re-render of an already-generated message.** Reject it
-  and (once campaign editing exists) regenerate, rather than editing
-  rendered text in place — keeps "the exact rendered text a human
-  approved" unambiguous, per `messages` carrying rendered text instead of
-  a template reference (CLAUDE.md's schema-decisions note).
+- **No re-render of an already-*approved* message, and no LLM-assisted
+  drafting.** Editing is deliberately scoped to plain manual text editing
+  of a `queued` message only (see above) — not an automated rewrite step.
+  The user raised the idea of using an LLM to personalise messages
+  per-business; the design decision (not yet built) is to constrain any
+  such assistance to *rephrasing the already-signal-grounded line*, never
+  to invent new claims about a business, since `compose/render.py`'s
+  entire safety property is that nothing reaches a lead's inbox that
+  isn't tied to a real, crawled signal — an LLM free to draft the whole
+  email would risk asserting something false about a business, which is
+  a real reputational/legal problem for unsolicited outreach, not just a
+  quality one.
 - **No real auth behind "Approving as."** It's a free-text name, not an
   authenticated identity — good enough for a single small team using this
   tool locally, not something to trust as an audit control beyond that.
@@ -121,6 +141,17 @@ attempt with no approver name set, confirmed a real approve sets
 `approved_by`/`approved_at` and displays them, confirmed reject sets
 `status='rejected'` and removes the action buttons, confirmed the
 campaign index's status-breakdown counts (`approved: 1, queued: 4,
-rejected: 1`) matched the approve/reject clicks exactly. Test campaign
-and its messages deleted from Postgres after verification, not left
-behind as leftover data.
+rejected: 1`) matched the approve/reject clicks exactly.
+
+Edit flow verified separately, also for real: created a second test
+campaign, edited a `queued` message's subject and body through the
+browser form, confirmed "Save changes" persisted the new text (visible
+on page reload, not just in the form), then approved that same message
+and confirmed the approved (now read-only) view showed the *edited* text,
+not the original template output. Confirmed the lock: a raw `curl POST`
+to that now-approved message's `/edit` endpoint returned a 303 (the route
+always redirects, edit or not) but left `status`/`subject` in Postgres
+completely unchanged, verified directly via `psql`/a session query, not
+just by trusting the redirect. Both test campaigns and their messages
+deleted from Postgres after verification, not left behind as leftover
+data.

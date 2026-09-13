@@ -316,11 +316,22 @@ def _render_show(
     rows: list[tuple[Message, Contact, Business]],
     approver: str,
     notice: str,
+    error: str = "",
 ) -> str:
     def message_row(message: Message, contact: Contact, business: Business) -> str:
         badge = _badge(message.status, _STATUS_COLORS.get(message.status, "#57606a"))
         actions = ""
         if message.status == "queued":
+            content = f"""
+            <form method="post" action="/campaigns/{campaign.id}/messages/{message.id}/edit" style="margin-bottom:8px;">
+              <input type="hidden" name="approver" value="{escape(approver)}">
+              <input type="text" name="subject" value="{escape(message.subject or '')}"
+                     style="width:100%;padding:5px 8px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;box-sizing:border-box;margin-bottom:6px;">
+              <textarea name="body" rows="6"
+                        style="width:100%;padding:6px 8px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box;">{escape(message.body or '')}</textarea>
+              <button type="submit" class="btn-secondary" style="margin-top:6px;">Save changes</button>
+            </form>
+            """
             actions = f"""
             <form method="post" action="/campaigns/{campaign.id}/messages/{message.id}/approve" style="display:inline">
               <input type="hidden" name="approver" value="{escape(approver)}">
@@ -331,16 +342,19 @@ def _render_show(
               <button type="submit" class="btn-reject">Reject</button>
             </form>
             """
-        elif message.status == "approved":
-            when = message.approved_at.strftime("%Y-%m-%d %H:%M") if message.approved_at else ""
-            actions = f'<span class="help">by {escape(message.approved_by or "?")} at {when}</span>'
+        else:
+            content = f"""
+            {escape(message.subject or "")}
+            <details><summary>show body</summary><pre>{escape(message.body or "")}</pre></details>
+            """
+            if message.status == "approved":
+                when = message.approved_at.strftime("%Y-%m-%d %H:%M") if message.approved_at else ""
+                actions = f'<span class="help">by {escape(message.approved_by or "?")} at {when}</span>'
         return f"""
         <tr>
           <td><strong>{escape(business.name)}</strong></td>
           <td>{escape(contact.email)}</td>
-          <td>{escape(message.subject or "")}
-            <details><summary>show body</summary><pre>{escape(message.body or "")}</pre></details>
-          </td>
+          <td>{content}</td>
           <td>{badge}</td>
           <td>{actions}</td>
         </tr>
@@ -350,10 +364,12 @@ def _render_show(
         '<tr><td colspan="5" style="text-align:center;color:#57606a;padding:24px;">No messages in this campaign.</td></tr>'
     )
     notice_html = f'<div class="notice">{escape(notice)}</div>' if notice else ""
+    error_html = f'<div class="errors">{escape(error)}</div>' if error else ""
     body = f"""
   <h1>Campaign -- {escape(campaign.name or str(campaign.id)[:8])}</h1>
   <div class="meta">target: {escape(target_name)} &middot; offer: {escape(campaign.offer_id)} &middot; sender pool: {escape(", ".join(mailbox_names))}</div>
   {notice_html}
+  {error_html}
   <form method="get" action="/campaigns/{campaign.id}" style="margin-bottom:16px;">
     <label style="display:inline;font-size:13px;">Approving as:
       <input type="text" name="approver" value="{escape(approver)}" placeholder="your name" style="width:200px;display:inline;">
@@ -369,7 +385,9 @@ def _render_show(
 
 
 @router.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
-def show_campaign(campaign_id: str, approver: str = "", created: str = "", skipped: str = "") -> HTMLResponse:
+def show_campaign(
+    campaign_id: str, approver: str = "", created: str = "", skipped: str = "", edit_error: str = ""
+) -> HTMLResponse:
     try:
         campaign_uuid = uuid.UUID(campaign_id)
     except ValueError:
@@ -403,7 +421,7 @@ def show_campaign(campaign_id: str, approver: str = "", created: str = "", skipp
         if created:
             notice = f"Created {created} message(s)" + (f", skipped {skipped}" if skipped and skipped != "0" else "") + "."
 
-        html = _render_show(campaign, target_name, list(mailbox_names), list(rows), approver, notice)
+        html = _render_show(campaign, target_name, list(mailbox_names), list(rows), approver, notice, edit_error)
     return HTMLResponse(html)
 
 
@@ -417,6 +435,43 @@ def _find_message(session, campaign_id: str, message_id: str) -> Message | None:
     if message is None or message.campaign_id != campaign_uuid:
         return None
     return message
+
+
+@router.post("/campaigns/{campaign_id}/messages/{message_id}/edit")
+def edit_message(
+    campaign_id: str,
+    message_id: str,
+    subject: str = Form(...),
+    body: str = Form(...),
+    approver: str = Form(""),
+) -> HTMLResponse:
+    """Lets a human rewrite one lead's rendered text before approving it --
+    the same template + one-generated-line render is a solid default, not
+    a guarantee it reads naturally for every business. Only touches a
+    `queued` message: once approved, `messages.subject`/`body` is the
+    record of exactly what a human signed off on (CLAUDE.md's
+    schema-decisions note on why `messages` carries rendered text, not a
+    template reference) -- editing after that would make that record
+    wrong, so this refuses rather than silently allowing it."""
+    subject = subject.strip()
+    body = body.strip()
+    approver = approver.strip()
+    error = ""
+    with session_scope() as session:
+        message = _find_message(session, campaign_id, message_id)
+        if message is None:
+            return HTMLResponse("<p>Message not found.</p>", status_code=404)
+        if message.status != "queued":
+            error = "Only a queued message can be edited -- it's already been approved or rejected."
+        elif not subject or not body:
+            error = "Subject and body can't be empty."
+        else:
+            message.subject = subject
+            message.body = body
+    params = f"?approver={quote(approver)}"
+    if error:
+        params += f"&edit_error={quote(error)}"
+    return RedirectResponse(url=f"/campaigns/{campaign_id}{params}", status_code=303)
 
 
 @router.post("/campaigns/{campaign_id}/messages/{message_id}/approve")

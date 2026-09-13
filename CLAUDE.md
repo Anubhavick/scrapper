@@ -77,10 +77,15 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   lists campaigns with a status breakdown; `/campaigns/new` creates one;
   `/campaigns/{id}` is the actual approval screen the hard rule "no send
   without a human clicking approve" needed — full rendered subject/body,
+  editable while `queued` (`POST .../edit`, locked once approved — an
+  edit request against an approved message is a silent no-op, verified),
   Approve/Reject per message, approving requires typing a name first
   (`approved_by` unaudited otherwise). **Sends nothing** — no route here
   calls `send/queue.py`/`send/gmail.py`; that's the orchestration loop,
-  still not built (below).
+  still not built (below). Editing is manual text only, on purpose — see
+  docs/11 for why an LLM-assisted rewrite isn't wired in yet (constrained
+  rephrasing of the already-grounded line, never free drafting, is the
+  intended shape if it's ever built).
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout

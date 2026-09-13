@@ -150,9 +150,16 @@ an offer + a sender pool (real, authorized `mailboxes` only) →
 renders one `queued` `messages` row per **qualified business** (not per
 contact — `_select_best_contact()` picks one address per business,
 preferring a named one over a generic `info@`-style one) via
-`compose/render.py` (already built, untouched) → a human reads the full
-rendered text and clicks Approve or Reject at `/campaigns/{id}`,
-required to type a name first so `approved_by` means something.
+`compose/render.py` (already built, untouched) → a human can hand-edit
+the subject/body of any still-`queued` message at `/campaigns/{id}`
+before clicking Approve or Reject, required to type a name first so
+`approved_by` means something. Editing is locked once approved — the
+`edit` route silently refuses to change an approved message, keeping
+`messages.subject`/`body` an accurate record of exactly what a human
+signed off on. Editing is manual only; an LLM-assisted rewrite was
+considered and deliberately not built yet — see docs/11 for why any
+future version of that should stay constrained to rephrasing the
+already-signal-grounded line, not free drafting.
 
 **Still not built:** the orchestration loop that reads `status='approved'`
 messages and actually calls `send/queue.py` + `send/gmail.py` against
@@ -205,7 +212,7 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done |
 | `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
 | `db/campaigns.py` | `create_campaign()` + `generate_campaign_messages()` -- turns a target_run's qualified leads into a campaign + one rendered message per business | Done, verified against real Postgres |
-| `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- read the full rendered text, Approve or Reject. Sends nothing itself | Done |
+| `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- edit a queued message's text, then Approve or Reject (edit locked once approved). Sends nothing itself | Done |
 | `api/nav.py` | Shared top-nav strip across all four pages | Done |
 | `api/` (rest) | Orchestration trigger (reads `approved` messages, calls `send/queue.py` + `send/gmail.py`) | **Not built** |
 
