@@ -22,6 +22,23 @@ from typing import Callable
 
 from leadgen.send.queue import SendBlocked, send_next
 
+try:
+    # Soft dependency: this module has no hard import of rq (it's meant
+    # to be usable/testable with zero external services, per the module
+    # docstring), but when a caller does run this inside an `rq worker`
+    # process (db/orchestration.py's job does, via jobs.py), the broad
+    # `except Exception` below would otherwise silently swallow RQ's own
+    # job-cancellation signal -- JobTimeoutException subclasses Exception,
+    # not BaseException, specifically the kind of thing a bare `except
+    # Exception` is written to catch. Caught for real during docs/13's
+    # verification: a job hit its (default, too-short-for-this-loop)
+    # timeout mid-sleep, the exception was swallowed as if it were "one
+    # bad message," and the job reported success -- defeating the
+    # timeout as a safety net entirely. See the docstring below.
+    from rq.timeouts import JobTimeoutException
+except ImportError:
+    JobTimeoutException = ()  # isinstance(exc, ()) is always False
+
 __all__ = ["SendJob", "SendResult", "run_orchestration_loop"]
 
 
@@ -86,7 +103,14 @@ def run_orchestration_loop(
     one-off network error isn't reliably distinguishable here from a
     per-message problem, so the conservative default is to keep trying
     the mailbox's remaining jobs rather than assume the whole mailbox is
-    broken."""
+    broken.
+
+    The one exception this re-raises instead of swallowing: an RQ
+    `JobTimeoutException` (when `rq` is installed). That signal means the
+    *process itself* is being cancelled -- treating it like an ordinary
+    per-message error would let the loop keep going, sleeping and
+    sending, indefinitely past whatever `job_timeout` was supposed to
+    enforce. See the module docstring for how this was actually caught."""
     by_mailbox: dict[object, list[SendJob]] = {}
     for job in jobs:
         by_mailbox.setdefault(job.mailbox_id, []).append(job)
@@ -109,6 +133,8 @@ def run_orchestration_loop(
                 if exc.reason == "cap":
                     break
                 continue
+            except JobTimeoutException:
+                raise  # the worker's own cancellation signal -- must propagate, never be treated as "one bad message"
             except Exception as exc:  # noqa: BLE001 -- see docstring: one bad send must not kill the run
                 if on_error is not None:
                     on_error(job, exc)

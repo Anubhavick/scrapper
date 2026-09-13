@@ -6,6 +6,7 @@ Postgres, verified manually instead -- see docs/12."""
 from __future__ import annotations
 
 import pytest
+from rq.timeouts import JobTimeoutException
 
 from leadgen.send.orchestrator import SendJob, run_orchestration_loop
 from leadgen.send.queue import SendBlocked
@@ -105,6 +106,30 @@ def test_send_fn_error_reported_and_does_not_abort_run():
 
     assert [(r.job.message_id, r.outcome) for r in results] == [("m1", "error"), ("m2", "sent")]
     assert errors == [("m1", "gmail API down")]
+
+
+def test_job_timeout_exception_propagates_instead_of_being_treated_as_a_send_error():
+    # Caught for real in docs/13: an rq worker's own job_timeout signal is
+    # an Exception subclass, so a naive `except Exception` swallows it --
+    # letting the loop keep sleeping/sending well past when the worker
+    # process was supposed to be killed. Must propagate, not be recorded
+    # as a per-message "error" outcome.
+    jobs = [_job("m1", mailbox_id="mb1"), _job("m2", mailbox_id="mb1")]
+
+    def send_fn(job):
+        raise JobTimeoutException("Task exceeded maximum timeout value (180 seconds)")
+
+    with pytest.raises(JobTimeoutException):
+        run_orchestration_loop(
+            jobs,
+            suppressed_emails_fn=set,
+            suppressed_domains_fn=set,
+            reserve_fn=lambda job: 0,
+            send_fn=send_fn,
+            on_sent=lambda job, resp: None,
+            on_blocked=lambda job, exc: pytest.fail("should not be a SendBlocked"),
+            on_error=lambda job, exc: pytest.fail("must not be reported as an ordinary per-message error"),
+        )
 
 
 def test_reserve_fn_is_called_after_suppression_checks_so_it_never_reserves_a_suppressed_send():

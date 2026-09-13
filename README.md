@@ -25,9 +25,12 @@ account (a real message was actually sent and received). Step 8's full
 web UI now exists: browse/create target profiles, browse run history,
 and build a campaign from a completed run and approve each rendered
 message by hand. The orchestration loop that reads an approved message
-and actually sends it is now built too (docs/12) — dry-run-verified
-against real Postgres, but not yet run with `--live` against a real
-campaign. That's the last step before this system can send for real.**
+and actually sends it is now built (docs/12), and so is a way to
+trigger it from the campaigns page itself via a background job
+(docs/13) instead of a terminal. Verified against real Postgres (+
+Redis for the UI path) in preview/dry-run modes, but not yet run for
+real against a real campaign. That's the last step before this system
+can send for real.**
 
 **Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
 hard gate — read 200 rows by hand *before* building anything past it,
@@ -109,17 +112,28 @@ What's done:
   both preview mode (confirmed zero writes) and `--dry-run` mode (happy
   path, a suppression-block, a cap-block) (docs/12). **Not yet run with
   `--live` against a real campaign.**
-- 196 passing tests, all against mocked HTTP, pure functions, or static
+- **Send from the UI**: `/campaigns/{id}` now has a Send section too —
+  the same read-only preview, and a confirm-phrase-gated button that
+  enqueues the send as a background job (`leadgen.jobs` + `leadgen.queue`,
+  RQ + Redis — both were already project dependencies, just unused until
+  now) instead of running inline, since a real send can take hours. Only
+  ever triggers a real send (never `--dry-run`'s test-data-only mode).
+  Verified against real Postgres + Redis with `live=False`, RQ worker
+  in burst mode, including the real 90–600s sleep running for real
+  (docs/13). Two more real concurrency/correctness bugs found and fixed
+  while building it — see docs/13.
+- 197 passing tests, all against mocked HTTP, pure functions, or static
   fixtures — no real network calls in the test suite itself (real
   verification runs, listed above, were separate manual steps)
 
 What's not done, and things worth knowing before trusting this against
 real data or a real send:
 
-- **The orchestration loop has never been run `--live`.** Everything
-  through message approval and the send loop itself is built and
-  verified against real Postgres (docs/12); pointing it at a real
-  campaign with a real Gmail send is a deliberate, separately-confirmed
+- **The orchestration loop has never sent for real** — not via `--live`,
+  not via the UI button. Everything through message approval and both
+  ways of triggering a send are built and verified against real Postgres
+  (docs/12, docs/13); pointing it at a real campaign with a real Gmail
+  send is a deliberate, separately-confirmed
   next action, not
   something this repo does on its own.
 - Bounce/reply monitoring (step 7) doesn't exist — needs the restricted
@@ -310,16 +324,21 @@ all. That hand-review is a human task now, not a build step.
   full loop for real (real reservation writes, faked Gmail call —
   disposable test data only, this really consumes real approved messages
   if pointed at them). `--live` plus typing back a confirmation phrase:
-  the real thing (docs/12).
+  the real thing (docs/12). The same three things are also reachable
+  from `/campaigns/{id}` itself (docs/13) — a preview, and a "Start
+  sending" button (confirm-phrase-gated, real sends only, never
+  `--dry-run`'s test mode) that hands the job to a background `rq
+  worker` process instead of blocking the page for however long a full
+  queue takes to send.
 
 Everything through approval and orchestration — campaign creation,
-message rendering, human approval, and the send loop itself — is built
-and verified (docs/11, docs/12). Real Google OAuth credentials and a
-`TOKEN_ENCRYPTION_KEY` already exist and have been verified against a
-real account (HOWTO.md, docs/06). **The one thing that hasn't happened
-yet is running `scripts/send_approved_messages.py --live` against a real
-campaign** — a deliberate, separately-confirmed step, not a missing
-capability.
+message rendering, human approval, and both ways of triggering the send
+loop — is built and verified (docs/11, docs/12, docs/13). Real Google
+OAuth credentials and a `TOKEN_ENCRYPTION_KEY` already exist and have
+been verified against a real account (HOWTO.md, docs/06). **The one
+thing that hasn't happened yet is an actual real send** — via `--live`
+or the UI button, against a real campaign — a deliberate,
+separately-confirmed step, not a missing capability.
 
 ## Project layout
 

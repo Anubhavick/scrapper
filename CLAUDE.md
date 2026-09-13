@@ -7,12 +7,14 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–6 are done, including the orchestration loop (docs/12) — and
-steps 3, 5, and 6 have now been verified against real external services,
-not just mocks — see the Verification note in each of docs/03, docs/06,
-docs/07, and docs/12. Step 7 (bounce/reply monitoring) is untouched.
-Step 8 (FastAPI + review UI) is done in substance: lead-review, run
-history, scan-builder, and campaigns + message-approval UIs all exist.
+Steps 1–6 are done, including the orchestration loop (docs/12) and a way
+to trigger it from the campaigns UI via a background RQ job instead of a
+terminal (docs/13) — and steps 3, 5, and 6 have now been verified against
+real external services, not just mocks — see the Verification note in
+each of docs/03, docs/06, docs/07, docs/12, and docs/13. Step 7
+(bounce/reply monitoring) is untouched. Step 8 (FastAPI + review UI) is
+done in substance: lead-review, run history, scan-builder, and
+campaigns + message-approval UIs all exist.
 
 - **Real, verified end-to-end:** `scripts/run_pipeline.py` against
   `targets/dentists-austin-tx.yaml` reaches live Overpass/Nominatim and
@@ -116,6 +118,39 @@ history, scan-builder, and campaigns + message-approval UIs all exist.
   per-message block from a per-mailbox one without parsing text.
   Verified in dry-run mode against real Postgres (docs/12); never yet
   run `--live`.
+- `src/leadgen/queue.py` + `src/leadgen/jobs.py` + `api/campaigns.py`'s
+  Send section (docs/13) — sending from the campaigns UI instead of a
+  terminal. `queue.py`'s `get_queue()` is an RQ `Queue` bound to
+  `REDIS_URL` (`rq`/`redis` were already dependencies, Redis already ran
+  via docker-compose — unused until now); `jobs.py`'s
+  `send_campaign_messages_job(campaign_id, live)` is the RQ job body
+  (plain picklable args only — opens its own session/client, same as the
+  CLI script) and now holds the single `CONFIRMATION_PHRASE` both the
+  CLI and the UI form import. `db/orchestration.py`'s three functions
+  all gained an optional `campaign_id` filter so the UI only ever acts
+  on one campaign. `/campaigns/{id}` shows a read-only preview, or (if
+  nothing's running) a confirm-phrase-gated "Start sending" button that
+  enqueues the job with a deterministic id (`send-campaign-<id>`, so a
+  second click while one's running is refused) — **only ever `live=True`,
+  the UI never exposes `--dry-run`'s test-only mode.** While a send runs,
+  the page shows that and auto-refreshes every 15s; progress is just the
+  messages table below updating live, no separate tracking. **Two more
+  real bugs found and fixed building this:** (1) `_reserve_fn` now
+  re-checks `message.status == "approved"` under the advisory lock
+  before reserving — without it, two overlapping runs over the same
+  mailbox (much easier to trigger from a browser than a terminal — two
+  tabs, an impatient second click) could both reserve and actually send
+  the same message twice. (2) `send/orchestrator.py`'s broad `except
+  Exception` (added in docs/12) was silently swallowing `rq`'s own
+  `JobTimeoutException` — it subclasses `Exception`, not `BaseException`
+  — letting a timed-out job report "success" and keep running instead of
+  actually stopping; fixed with a soft `rq` import that re-raises it
+  instead, covered by a new pure test. Also hit (and documented in
+  HOWTO.md) a macOS-only `rq worker` fork-safety crash, unrelated to this
+  codebase — set `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` if it happens.
+  Verified against real Postgres + Redis with `live=False` (RQ `--burst`
+  worker, including the real 90-600s sleep running uninterrupted); not
+  yet clicked through in an actual browser.
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
@@ -174,12 +209,14 @@ history, scan-builder, and campaigns + message-approval UIs all exist.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step: **run `scripts/send_approved_messages.py --live`
-against a real approved campaign** — everything up to this is built and
+Next concrete step: **trigger a real send against a real approved
+campaign** — either `scripts/send_approved_messages.py --live` from a
+terminal, or the "Start sending" button on `/campaigns/{id}` (needs an
+`rq worker` running, docs/13). Everything up to this is built and
 verified. This is real, external, hard-to-reverse behavior (real email
 to real business owners) and must not happen without the user explicitly
-confirming it first, on top of the script's own `--live` + typed-
-confirmation gate; do not run it yourself without that confirmation.
+confirming it first, on top of either path's own confirmation gate; do
+not trigger it yourself without that confirmation.
 
 Full backlog after that, in priority order, with reasoning: **[ROADMAP.md](ROADMAP.md)**
 — keep it updated as items ship or new ones are found, don't just leave

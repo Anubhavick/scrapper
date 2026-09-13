@@ -43,9 +43,8 @@ from dotenv import load_dotenv
 
 from leadgen.db.orchestration import preview_approved_messages, run_approved_messages
 from leadgen.db.session import session_scope
+from leadgen.jobs import CONFIRMATION_PHRASE
 from leadgen.send.crypto import TokenCipher
-
-CONFIRMATION_PHRASE = "send real email"
 
 
 def main() -> None:

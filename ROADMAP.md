@@ -9,25 +9,40 @@ For *why* any shipped decision looks the way it does, see the matching
 `docs/NN-*.md` file. For the full current-state map, see
 [MANUAL.md](MANUAL.md) and [CLAUDE.md](CLAUDE.md).
 
-## Status: everything through the send loop is built. Nothing has sent for real yet.
+## Status: everything through the send loop is built, from a terminal or the UI. Nothing has sent for real yet.
 
 ```
 DISCOVER → CRAWL → QUALIFY → COMPOSE → REVIEW → SEND → MONITOR
    ✅        ✅        ✅        ✅        ✅      ⚠️       ❌
                                                  built,
                                               never run
-                                               --live
+                                             for real yet
 ```
+
+SEND is reachable two ways now: `scripts/send_approved_messages.py
+--live` (every approved message, system-wide) or the "Start sending"
+button on `/campaigns/{id}` (one campaign, backed by an `rq worker`
+background job so the button doesn't block on hours of sleeping between
+messages — docs/13). Neither has been used for a real send yet.
 
 ## Immediate next step
 
-**Run `scripts/send_approved_messages.py --live` against a real approved
-campaign.** Everything up to this is built and dry-run-verified against
-real Postgres (docs/12). This is real, external, hard-to-reverse
-behavior — it emails real business owners — so it needs an explicit
-human decision each time, not something any Claude session should do on
-its own initiative. The script itself requires `--live` plus typing back
-a confirmation phrase, on top of that.
+**Trigger a real send against a real approved campaign** — either
+`scripts/send_approved_messages.py --live` from a terminal, or "Start
+sending" on `/campaigns/{id}` with an `rq worker` running. Everything up
+to this is built and verified against real Postgres (+ Redis for the UI
+path) in preview/dry-run/`live=False` modes (docs/12, docs/13). This is
+real, external, hard-to-reverse behavior — it emails real business
+owners — so it needs an explicit human decision each time, not something
+any Claude session should do on its own initiative. Both paths require
+their own confirmation gate (a typed phrase) on top of that.
+
+Worth doing before that first real send: **click through the new Send
+UI in an actual browser** (page render, the confirm-phrase rejection
+path, the "already running" guard) — it's only been verified by running
+the underlying job directly, not through the web form itself, unlike
+every other UI page in this repo which caught real bugs exactly this way
+(docs/09, docs/11).
 
 ## Backlog, roughly in priority order
 
@@ -80,6 +95,10 @@ a confirmation phrase, on top of that.
    - No re-check of `mailboxes.is_active` mid-run in the orchestration
      loop (docs/12) — a single invocation snapshots active mailboxes
      once, up front.
+   - The Send UI (docs/13) has no progress bar, ETA, or cancel button —
+     just "reload the page and look at the messages table" — and no
+     history of past send jobs beyond what `messages.status`/`sent_at`
+     already record.
 
 ## Explicitly deferred, not forgotten
 
@@ -90,5 +109,8 @@ a confirmation phrase, on top of that.
   nothing reaches a lead's inbox that isn't tied to a real crawled
   signal, and free-drafting would risk asserting something false about a
   business, a real reputational/legal problem for unsolicited outreach.
-- **Scheduling the orchestration loop.** It's a script a human runs, on
-  purpose, until step 7 exists — no cron/RQ job invokes it automatically.
+- **Scheduling the orchestration loop.** A human still has to trigger
+  every send, on purpose, until step 7 exists — the UI's "Start sending"
+  button (docs/13) runs it via `rq worker` instead of blocking on the
+  page, but that's still a human click, not a schedule. No cron or
+  automatic trigger exists.

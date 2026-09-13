@@ -50,18 +50,29 @@ logger = logging.getLogger(__name__)
 __all__ = ["build_send_jobs", "preview_approved_messages", "run_approved_messages"]
 
 
-def build_send_jobs(session: Session) -> list[SendJob]:
+def build_send_jobs(session: Session, *, campaign_id=None) -> list[SendJob]:
     """One SendJob per `messages` row with status='approved' whose
     mailbox is active, ordered so each mailbox's own queue is processed
     oldest-approved-first. A message whose mailbox was deactivated after
     approval (docs/11 flags this as a known gap -- mailbox_id is assigned
     at message-generation time, not send time) is skipped rather than
-    sent from a mailbox nobody vouched for as currently active."""
+    sent from a mailbox nobody vouched for as currently active.
+
+    `campaign_id`, when given, narrows this to one campaign's approved
+    messages -- used by `api/campaigns.py`'s per-campaign "Send" section
+    (docs/13) so a click there only ever acts on that campaign, never
+    every approved message system-wide. The per-mailbox daily cap this
+    feeds into `preview_approved_messages()`/`run_approved_messages()`
+    is still the mailbox's *global* `count_sent_today` either way -- the
+    cap is a property of the mailbox, not of any one campaign."""
+    conditions = [Message.status == "approved", Mailbox.is_active.is_(True)]
+    if campaign_id is not None:
+        conditions.append(Message.campaign_id == campaign_id)
     rows = session.execute(
         select(Message, Mailbox, Contact)
         .join(Mailbox, Message.mailbox_id == Mailbox.id)
         .join(Contact, Message.contact_id == Contact.id)
-        .where(Message.status == "approved", Mailbox.is_active.is_(True))
+        .where(*conditions)
         .order_by(Mailbox.id, Message.created_at)
     ).all()
     return [
@@ -75,7 +86,7 @@ def build_send_jobs(session: Session) -> list[SendJob]:
     ]
 
 
-def preview_approved_messages(session: Session) -> list[dict]:
+def preview_approved_messages(session: Session, *, campaign_id=None) -> list[dict]:
     """A genuinely read-only look at what `run_approved_messages(dry_run=
     True)` would act on -- no advisory lock, no reservation, no write of
     any kind. This exists because "dry run" turned out to be a misleading
@@ -90,8 +101,11 @@ def preview_approved_messages(session: Session) -> list[dict]:
     those messages (flip them to `sent` with no email ever sent, leaving
     them unrecoverable by a later `--live` run without manual DB
     surgery). This function is what a real "just show me what would
-    happen" default should call instead."""
-    jobs = build_send_jobs(session)
+    happen" default should call instead. `campaign_id` narrows this to
+    one campaign's approved messages (see `build_send_jobs`'s docstring);
+    `sent_today`/`daily_cap` still reflect the mailbox's real global
+    count either way."""
+    jobs = build_send_jobs(session, campaign_id=campaign_id)
     now = datetime.now(timezone.utc)
     by_mailbox: dict = {}
     for job in jobs:
@@ -122,11 +136,30 @@ def _reserve_fn(session: Session, message_id, mailbox_id, daily_cap: int, now: d
     there's room -- transitions this message to `sent` and commits before
     returning, all inside the one locked transaction. Always returns the
     *pre*-reservation count so `send_next()`'s own can_send recomputation
-    agrees with what was just decided."""
+    agrees with what was just decided.
+
+    Also re-checks that `message.status` is still `approved` under the
+    lock before reserving it. The advisory lock alone only serialises the
+    *cap count*; without this check, two overlapping runs over the same
+    mailbox (the campaigns UI now makes accidentally starting a second
+    run -- e.g. two browser tabs -- easier than the CLI ever was, see
+    docs/13) could both have already fetched the same message as
+    `approved` before either reserved it, and the second run would flip
+    an already-`sent` message back through the whole send path a second
+    time -- a real duplicate email, not just a duplicate DB write. If the
+    status has moved on, this returns `daily_cap` so `can_send` reports
+    "no room" and `send_next` raises `SendBlocked` (reason `"cap"`)
+    instead of proceeding -- an intentionally conservative label for an
+    unusual case, not a true cap exhaustion, but it produces the one
+    behavior that actually matters here: never call `send_fn` twice for
+    the same message."""
     session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": str(mailbox_id)})
+    message = session.get(Message, message_id)
+    if message.status != "approved":
+        session.rollback()
+        return daily_cap
     sent_today = count_sent_today(session, mailbox_id, now)
     if sent_today < daily_cap:
-        message = session.get(Message, message_id)
         message.status = "sent"
         message.sent_at = now
         session.commit()
@@ -143,6 +176,7 @@ def run_approved_messages(
     client_secret: str,
     cipher: TokenCipher,
     dry_run: bool = True,
+    campaign_id=None,
 ) -> list[SendResult]:
     """Builds jobs from every `approved` message with an active mailbox
     and drives them through `send/orchestrator.py`'s
@@ -158,8 +192,13 @@ def run_approved_messages(
     a genuine read-only look at what would happen; reserve calling this
     function at all (`dry_run` either way) for disposable test data or a
     human-confirmed real send (`dry_run=False`).
+
+    `campaign_id`, when given, narrows this to one campaign's approved
+    messages -- see `build_send_jobs`'s docstring. `jobs.py`'s
+    `send_campaign_messages_job()` (docs/13) always passes this; only
+    the CLI script leaves it unset to act on every approved message.
     """
-    jobs = build_send_jobs(session)
+    jobs = build_send_jobs(session, campaign_id=campaign_id)
     if not jobs:
         return []
 

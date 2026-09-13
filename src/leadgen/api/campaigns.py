@@ -30,7 +30,12 @@ from leadgen.api.nav import nav_bar
 from leadgen.api.targets import load_registries
 from leadgen.db.campaigns import CampaignError, create_campaign, generate_campaign_messages
 from leadgen.db.models import Business, Campaign, CampaignMailbox, Contact, Mailbox, Message, TargetRun, TargetRunBusiness
+from leadgen.db.orchestration import preview_approved_messages
 from leadgen.db.session import session_scope
+from leadgen.jobs import CONFIRMATION_PHRASE, send_campaign_messages_job
+from leadgen.queue import get_queue
+
+_ACTIVE_JOB_STATUSES = {"queued", "started", "deferred", "scheduled"}
 
 router = APIRouter()
 
@@ -73,13 +78,14 @@ def _badge(text: str, color: str) -> str:
     )
 
 
-def _page(title: str, active: str, body: str) -> str:
+def _page(title: str, active: str, body: str, extra_head: str = "") -> str:
     return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>{escape(title)}</title>
 <style>{_STYLE}</style>
+{extra_head}
 </head>
 <body>
   {nav_bar(active)}
@@ -306,6 +312,123 @@ async def create_campaign_route(request: Request) -> HTMLResponse:
     return RedirectResponse(url=f"/campaigns/{campaign_id}?{notice}", status_code=303)
 
 
+# ------------------------------------------------------------------ send
+
+
+def _send_job_id(campaign_id) -> str:
+    return f"send-campaign-{campaign_id}"
+
+
+def _active_send_job_status(campaign_id) -> str | None:
+    """The RQ status string if a send job for this campaign is currently
+    queued/running, else None. Called from a GET route (rendering the
+    page) as well as the POST route (deciding whether to enqueue) --
+    a Redis hiccup here should degrade to "no active job" rather than
+    break the page, so failures are swallowed rather than raised."""
+    try:
+        job = get_queue().fetch_job(_send_job_id(campaign_id))
+    except Exception:
+        return None
+    if job is None:
+        return None
+    status = job.get_status(refresh=True)
+    return status if status in _ACTIVE_JOB_STATUSES else None
+
+
+def _render_send_section(
+    campaign: Campaign,
+    preview: list[dict],
+    mailbox_names_by_id: dict,
+    active_status: str | None,
+    send_error: str = "",
+) -> str:
+    error_html = f'<div class="errors">{escape(send_error)}</div>' if send_error else ""
+
+    if active_status is not None:
+        return f"""
+    <fieldset>
+      <legend>Send</legend>
+      <div class="notice">A send is currently <strong>{escape(active_status)}</strong> for this campaign.
+      This page refreshes itself every 15s -- progress is read straight from each message's status below,
+      not from a separate progress bar.</div>
+    </fieldset>
+        """
+
+    if not preview:
+        return f"""
+    <fieldset>
+      <legend>Send</legend>
+      {error_html}
+      <div class="help">No approved messages ready to send yet -- approve some below first.</div>
+    </fieldset>
+        """
+
+    rows = "".join(
+        f"""<tr>
+          <td>{escape(mailbox_names_by_id.get(row['mailbox_id'], str(row['mailbox_id'])[:8]))}</td>
+          <td>{row['queued']}</td>
+          <td>{row['sent_today']}/{row['daily_cap']}</td>
+          <td>{row['would_send_now']}</td>
+          <td>{row['would_be_cap_blocked']}</td>
+        </tr>"""
+        for row in preview
+    )
+    return f"""
+    <fieldset>
+      <legend>Send</legend>
+      {error_html}
+      <table style="margin-bottom:12px;">
+        <thead><tr><th>Mailbox</th><th>Approved (this campaign)</th><th>Sent today (mailbox-wide)</th>
+        <th>Would send now</th><th>Would be cap-blocked</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <div class="help">Sending is slow on purpose: a randomised 90&ndash;600s gap between each message, with
+      suppression and the daily cap re-checked against fresh state right before each one goes out. This runs in
+      the background once started &mdash; you can leave this page and come back.</div>
+      <form method="post" action="/campaigns/{campaign.id}/send" style="margin-top:10px;">
+        <label>Type &ldquo;{escape(CONFIRMATION_PHRASE)}&rdquo; to confirm, then start sending real email:</label>
+        <input type="text" name="confirm" placeholder="{escape(CONFIRMATION_PHRASE)}">
+        <button type="submit" class="btn" style="margin-top:8px;">Start sending</button>
+      </form>
+    </fieldset>
+    """
+
+
+@router.post("/campaigns/{campaign_id}/send", response_class=HTMLResponse)
+def start_send(campaign_id: str, confirm: str = Form("")) -> HTMLResponse:
+    try:
+        campaign_uuid = uuid.UUID(campaign_id)
+    except ValueError:
+        return HTMLResponse(f"<p>Not a valid campaign id: {escape(campaign_id)}</p>", status_code=404)
+
+    with session_scope() as session:
+        campaign_exists = session.get(Campaign, campaign_uuid) is not None
+    if not campaign_exists:
+        return HTMLResponse(f"<p>No campaign found for id {escape(campaign_id)}</p>", status_code=404)
+
+    if confirm.strip() != CONFIRMATION_PHRASE:
+        error = quote(f'Confirmation phrase did not match "{CONFIRMATION_PHRASE}" -- nothing started.')
+        return RedirectResponse(url=f"/campaigns/{campaign_id}?send_error={error}", status_code=303)
+
+    if _active_send_job_status(campaign_uuid) is not None:
+        error = quote("A send is already in progress for this campaign -- nothing new started.")
+        return RedirectResponse(url=f"/campaigns/{campaign_id}?send_error={error}", status_code=303)
+
+    try:
+        get_queue().enqueue(
+            send_campaign_messages_job,
+            campaign_id=str(campaign_uuid),
+            live=True,
+            job_id=_send_job_id(campaign_uuid),
+            job_timeout=12 * 60 * 60,
+        )
+    except Exception as exc:
+        error = quote(f"Could not reach the job queue (Redis) -- is `docker compose up -d` running? {exc}")
+        return RedirectResponse(url=f"/campaigns/{campaign_id}?send_error={error}", status_code=303)
+
+    return RedirectResponse(url=f"/campaigns/{campaign_id}", status_code=303)
+
+
 # ------------------------------------------------------------------ show
 
 
@@ -317,6 +440,8 @@ def _render_show(
     approver: str,
     notice: str,
     error: str = "",
+    send_section: str = "",
+    auto_refresh: bool = False,
 ) -> str:
     def message_row(message: Message, contact: Contact, business: Business) -> str:
         badge = _badge(message.status, _STATUS_COLORS.get(message.status, "#57606a"))
@@ -376,17 +501,24 @@ def _render_show(
     </label>
     <button type="submit" class="btn-secondary">Set</button>
   </form>
+  {send_section}
   <table>
     <thead><tr><th>Business</th><th>Contact</th><th>Subject / body</th><th>Status</th><th></th></tr></thead>
     <tbody>{body_rows}</tbody>
   </table>
     """
-    return _page(f"Campaign -- {campaign.name or ''}", "/campaigns", body)
+    extra_head = '<meta http-equiv="refresh" content="15">' if auto_refresh else ""
+    return _page(f"Campaign -- {campaign.name or ''}", "/campaigns", body, extra_head=extra_head)
 
 
 @router.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
 def show_campaign(
-    campaign_id: str, approver: str = "", created: str = "", skipped: str = "", edit_error: str = ""
+    campaign_id: str,
+    approver: str = "",
+    created: str = "",
+    skipped: str = "",
+    edit_error: str = "",
+    send_error: str = "",
 ) -> HTMLResponse:
     try:
         campaign_uuid = uuid.UUID(campaign_id)
@@ -400,15 +532,13 @@ def show_campaign(
 
         target_run = session.get(TargetRun, campaign.target_run_id)
         target_name = target_run.target_name if target_run else "(deleted run)"
-        mailbox_names = (
-            session.execute(
-                select(Mailbox.name)
-                .join(CampaignMailbox, CampaignMailbox.mailbox_id == Mailbox.id)
-                .where(CampaignMailbox.campaign_id == campaign.id)
-            )
-            .scalars()
-            .all()
-        )
+        campaign_mailboxes = session.execute(
+            select(Mailbox.id, Mailbox.name)
+            .join(CampaignMailbox, CampaignMailbox.mailbox_id == Mailbox.id)
+            .where(CampaignMailbox.campaign_id == campaign.id)
+        ).all()
+        mailbox_names = [name for _, name in campaign_mailboxes]
+        mailbox_names_by_id = dict(campaign_mailboxes)
         rows = session.execute(
             select(Message, Contact, Business)
             .join(Contact, Message.contact_id == Contact.id)
@@ -421,7 +551,21 @@ def show_campaign(
         if created:
             notice = f"Created {created} message(s)" + (f", skipped {skipped}" if skipped and skipped != "0" else "") + "."
 
-        html = _render_show(campaign, target_name, list(mailbox_names), list(rows), approver, notice, edit_error)
+        active_status = _active_send_job_status(campaign_uuid)
+        preview = [] if active_status else preview_approved_messages(session, campaign_id=campaign_uuid)
+        send_section = _render_send_section(campaign, preview, mailbox_names_by_id, active_status, send_error)
+
+        html = _render_show(
+            campaign,
+            target_name,
+            list(mailbox_names),
+            list(rows),
+            approver,
+            notice,
+            edit_error,
+            send_section=send_section,
+            auto_refresh=active_status is not None,
+        )
     return HTMLResponse(html)
 
 
