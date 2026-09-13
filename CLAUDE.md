@@ -54,12 +54,29 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   message-approval UI the hard rule "no send without a human clicking
   approve" needs — that needs `campaigns`/`messages` rows to review,
   which nothing creates yet (see the orchestration-loop gap below).
-- **Still not built, on purpose:** the scan-builder page (fill in a form,
-  get a target-profile YAML — currently hand-edited only); nothing turns
-  a qualified lead into `campaigns`/`messages` rows; nothing orchestrates
-  reading approved messages and actually calling `send/queue.py` +
-  `send/gmail.py` against them; no message-approval UI (needs the above
-  to exist first); bounce/reply monitoring (step 7, needs restricted
+- `src/leadgen/api/targets.py` — a FastAPI **scan-builder** UI (docs/10),
+  mounted onto the same `app`: `/targets` lists every `targets/*.yaml`
+  (parsed through the real loader, so a bad business_type/offer_id
+  reference shows as "Invalid" inline instead of crashing the page);
+  `/targets/new` (+ `POST /targets`) is a form that writes a new profile,
+  validated by `TargetProfile.model_validate()` itself — the same model
+  the loader uses — plus a business_type/offer_id existence check;
+  `/targets/{name}` shows the raw YAML and the `run_pipeline.py` command
+  to actually run it (doesn't trigger a scan itself — see below). Create-
+  only: a name colliding with an existing file is rejected, never
+  overwritten. `name` is sanitised as a filename
+  (`^[a-z0-9][a-z0-9-]{0,62}$`) since it becomes one — this is what
+  blocks path-traversal input, not just a "looks like a slug" nicety.
+  `src/leadgen/api/nav.py` is the shared nav bar across all three pages.
+- **Still not built, on purpose:** the scan-builder page doesn't trigger a
+  scan (real Overpass + per-business HTTP calls can take minutes —
+  running that synchronously in a request handler is a browser-timeout
+  footgun, and doing it properly is the orchestration-loop work below,
+  not this page's); nothing turns a qualified lead into
+  `campaigns`/`messages` rows; nothing orchestrates reading approved
+  messages and actually calling `send/queue.py` + `send/gmail.py` against
+  them; no message-approval UI (needs the above to exist first);
+  bounce/reply monitoring (step 7, needs restricted
   `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
@@ -114,16 +131,14 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   the full reasoning behind any non-obvious decision before redoing it.
 
 Next concrete step (per the three-UI-page plan the user chose: history →
-scan-builder → campaigns; history is docs/09, done): the scan-builder
-page — a form that writes a `targets/*.yaml` file, matching what's
-currently only hand-editable. After that, campaigns: turn a `target_run`
-into a `campaigns` row (offer + sender pool), generate `queued`
-`messages` rows for its qualified contacts via `compose/render.py`
-(already built), extend the review UI (or a new page) to let a human
-drop leads from the campaign and approve each rendered message, then the
-orchestration loop calling `send/queue.py` + `send/gmail.py` against
-approved ones. The hard rule about human approval has nothing to click
-until the first two pieces of
+scan-builder → campaigns; both history (docs/09) and scan-builder
+(docs/10) are done): campaigns. Turn a `target_run` into a `campaigns`
+row (offer + sender pool), generate `queued` `messages` rows for its
+qualified contacts via `compose/render.py` (already built), extend the
+review UI (or a new page) to let a human drop leads from the campaign and
+approve each rendered message, then the orchestration loop calling
+`send/queue.py` + `send/gmail.py` against approved ones. The hard rule
+about human approval has nothing to click until the first two pieces of
 that exist.
 
 ## Commands

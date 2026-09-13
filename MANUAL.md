@@ -193,8 +193,10 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `db/models.py` | Full SQLAlchemy schema | Done, migrated |
 | `compose/render.py` | Renders subject + one generated line from an offer template, grounded in a real signal | Done, tested. Raises rather than fabricating a generic line if no relevant signal is actually true |
 | `send/{crypto,oauth,gmail,caps,suppression,queue}.py` | Refresh-token encryption, Gmail OAuth flow (`gmail.send` only), MIME + actual send call, cap/suppression/delay decision logic | Done, tested; **verified against a real Gmail account** (a real message was sent and received) |
-| `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09) | Done. Message-approval UI is a separate, unbuilt piece |
-| `api/` (rest) | The scan-builder form (target-profile YAML from a form), campaign creation, message approval, orchestration trigger | **Not built** |
+| `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done. Message-approval UI is a separate, unbuilt piece |
+| `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
+| `api/nav.py` | Shared top-nav strip across all three pages | Done |
+| `api/` (rest) | Campaign creation, message approval, orchestration trigger | **Not built** |
 
 ## 6. Setup & running
 
@@ -206,13 +208,16 @@ uv sync                          # installs into .venv, Python 3.12 pinned
 cp .env.example .env             # fill in real secrets later; never commit .env
 docker compose up -d             # postgres:16 + redis:7
 uv run alembic upgrade head      # apply migrations
-uv run pytest                    # should be all green (172 tests as of this writing)
+uv run pytest                    # should be all green (188 tests as of this writing)
 ```
 
-Run a real scan (discovers, crawls, qualifies, persists to Postgres,
-writes a CSV):
+Build a new target profile without hand-editing YAML, or browse the ones
+that exist, then run one (discovers, crawls, qualifies, persists to
+Postgres, writes a CSV):
 
 ```bash
+uv run uvicorn leadgen.api.review:app --reload
+# http://127.0.0.1:8000/targets           -- browse/duplicate/create profiles
 uv run python scripts/run_pipeline.py targets/dentists-austin-tx.yaml leads.csv
 ```
 
@@ -220,7 +225,6 @@ Review the result in a browser — either the CSV directly, or (now that
 it's persisted) the run's history entry:
 
 ```bash
-uv run uvicorn leadgen.api.review:app --reload
 # CSV-based, no DB needed:
 # http://127.0.0.1:8000/?csv=leads.csv&profile=targets/dentists-austin-tx.yaml
 # DB-based, every past run:
@@ -232,7 +236,7 @@ large transfers, not a real block — retry with `UV_HTTP_TIMEOUT=240`.
 
 ## 7. Testing
 
-`uv run pytest` — 172 tests, all pure-function or mocked-`httpx`, zero
+`uv run pytest` — 188 tests, all pure-function or mocked-`httpx`, zero
 real network calls, zero real database. This is intentional and has a
 consequence worth knowing: two real modules
 (`db/repository.py`, `db/persist.py`) — and the `/runs`/`/runs/{id}`
@@ -250,6 +254,13 @@ Similarly, live network reachability (Overpass, Nominatim, real business
 websites, real Gmail) is confirmed by the manual verification runs
 recorded in docs/03, docs/06, docs/07, docs/08, and docs/09 — not by the
 automated suite, which mocks all of it deliberately.
+
+`api/targets.py` (docs/10) is the exception among the API modules: it has
+no Postgres dependency at all (target profiles live in files, not the
+DB), so its 16 tests in `test_targets_api.py` run against an isolated
+`tmp_path` config set and are fully part of the automated suite —
+including the create-only-never-overwrite guarantee and the filename
+sanitisation that blocks path traversal.
 
 ## 8. Hard rules (non-negotiable, enforced in code)
 
@@ -276,8 +287,8 @@ real send in a new region.
 ## 9. Current status (as of this writing)
 
 Build order steps 1–6 done; step 7 (bounce/reply) untouched; step 8
-(FastAPI + review UI) partially done — lead review and run history exist,
-message approval doesn't.
+(FastAPI + review UI) partially done — lead review, run history, and the
+scan-builder form exist, message approval doesn't.
 
 Real, verified — not just passing mocked tests:
 
@@ -286,20 +297,19 @@ Real, verified — not just passing mocked tests:
 - The "read 200 rows by hand" checkpoint, at smaller volume (31 rows) than PROJECT.md's 200 (docs/07)
 - Pipeline → Postgres persistence, including a real bug (a multi-location chain colliding on `normalized_domain`) found and fixed on the first real run (docs/08)
 - The `/runs`/`/runs/{id}` run-history UI, including two real bugs a browser session (not the unit suite) caught: a `DetachedInstanceError` from reading an ORM attribute after its session closed, and FastAPI treating an empty-string `Form(...)` field as missing rather than empty (docs/09)
+- The `/targets` scan-builder UI: a real profile created through the form round-tripped through the actual `load_target_profile()` loader correctly typed, and create-only (never-overwrite) + filename-sanitisation behavior confirmed both by browser testing and by dedicated tests (docs/10)
 
-The three-UI-page plan the user asked for is: history/review (done,
-docs/09) → scan-builder form (next) → campaigns page. Not built, in
-priority order:
+The three-UI-page plan the user asked for is: history/review (docs/09,
+done) → scan-builder form (docs/10, done) → campaigns page (next). Not
+built, in priority order:
 
-1. **Scan-builder page**: a form that writes a `targets/*.yaml` file —
-   currently these are hand-edited only.
-2. **Orchestration**: `target_run` → `campaigns`/`messages` rows, then a
+1. **Orchestration**: `target_run` → `campaigns`/`messages` rows, then a
    loop calling `send/queue.py` + `send/gmail.py` against approved ones.
-3. **Message-approval UI** — needs #2 to exist first (nothing to approve
+2. **Message-approval UI** — needs #1 to exist first (nothing to approve
    without it).
-4. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+3. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
    the restricted `gmail.readonly`/`gmail.modify` scopes.
-5. Google Places as a second discover source (designed for in
+4. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

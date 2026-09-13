@@ -33,11 +33,14 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
+from leadgen.api.nav import nav_bar
+from leadgen.api.targets import router as targets_router
 from leadgen.db.models import Business, Contact, TargetRun, TargetRunBusiness
 from leadgen.db.session import session_scope
 from leadgen.util.domains import normalise_domain
 
 app = FastAPI(title="Lead Review")
+app.include_router(targets_router)
 
 CRAWL_STATUSES = ["ok", "partial", "unreachable", "no_website"]
 DEFAULT_CSV = "leads-austin-dentists.csv"
@@ -215,6 +218,7 @@ def _render_page(
     action: str = "/",
     return_to: str = "/",
     back_link: str = "",
+    nav_active: str = "/",
 ) -> str:
     filter_qs = urlencode({"csv": csv_path, "profile": profile_path, "qualified": qualified, "status": status, "q": q})
     body_rows = "".join(_row_html(row, csv_path, profile_path, filter_qs, return_to) for row in rows) or (
@@ -243,6 +247,7 @@ def _render_page(
 </style>
 </head>
 <body>
+  {nav_bar(nav_active)}
   {back_link}
   <h1>{heading}</h1>
   <div class="meta">{len(rows)} of {all_count} rows shown{meta_extra}</div>
@@ -313,7 +318,7 @@ def reject(
 _RUN_STATUS_COLORS = {"completed": "#1a7f37", "failed": "#cf222e", "running": "#9a6700"}
 
 
-def _render_runs_page(runs: list[TargetRun]) -> str:
+def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "") -> str:
     def run_row(run: TargetRun) -> str:
         badge = _badge(run.status, _RUN_STATUS_COLORS.get(run.status, "#57606a"))
         finished = run.finished_at.strftime("%Y-%m-%d %H:%M") if run.finished_at else ""
@@ -335,6 +340,12 @@ def _render_runs_page(runs: list[TargetRun]) -> str:
         '<tr><td colspan="6" style="text-align:center;color:#57606a;padding:24px;">'
         "No runs yet -- run scripts/run_pipeline.py against a target profile first.</td></tr>"
     )
+    heading = f"Run history -- {escape(target_name_filter)}" if target_name_filter else "Run history"
+    filter_note = (
+        f'<div class="meta"><a href="/runs" style="color:#0969da;">&larr; all targets</a></div>'
+        if target_name_filter
+        else ""
+    )
     return f"""<!doctype html>
 <html>
 <head>
@@ -350,8 +361,10 @@ def _render_runs_page(runs: list[TargetRun]) -> str:
 </style>
 </head>
 <body>
-  <h1>Run history</h1>
+  {nav_bar("/runs")}
+  <h1>{heading}</h1>
   <div class="meta">{len(runs)} run(s) &middot; each is one target-profile execution, oldest run's rows still queryable even after a re-scan</div>
+  {filter_note}
   <table>
     <thead>
       <tr><th>Target</th><th>Status</th><th>Started</th><th>Finished</th><th>Businesses found</th><th></th></tr>
@@ -363,10 +376,13 @@ def _render_runs_page(runs: list[TargetRun]) -> str:
 
 
 @app.get("/runs", response_class=HTMLResponse)
-def list_runs() -> HTMLResponse:
+def list_runs(target_name: str = "") -> HTMLResponse:
     with session_scope() as session:
-        runs = session.execute(select(TargetRun).order_by(TargetRun.started_at.desc())).scalars().all()
-        html = _render_runs_page(list(runs))
+        stmt = select(TargetRun).order_by(TargetRun.started_at.desc())
+        if target_name:
+            stmt = stmt.where(TargetRun.target_name == target_name)
+        runs = session.execute(stmt).scalars().all()
+        html = _render_runs_page(list(runs), target_name)
     return HTMLResponse(html)
 
 
@@ -439,5 +455,6 @@ def show_run(
         action=f"/runs/{run_id}",
         return_to=f"/runs/{run_id}",
         back_link='<a class="back" href="/runs">&larr; Run history</a>',
+        nav_active="/runs",
     )
     return HTMLResponse(html)
