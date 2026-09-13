@@ -272,6 +272,61 @@ open to anyone who can reach it.
     session's concurrent commit immediately.
   All five verified against real Postgres/the real running server with
   disposable data, cleaned up after — see docs/19's Verification section.
+- **docs/20** — PROJECT.md's GDPR/DPDP legal-posture table was spec-only
+  until now: no `legal_region`/`requires_opt_in` field existed anywhere,
+  and nothing in the send path checked either. `config/models.py`'s
+  `TargetProfile` gained `legal_region: Literal["us", "eu_uk", "india"]`
+  (required, no default — an author who forgets it should never get a
+  silent posture, per PROJECT.md framing this as "the target country is
+  a config flag") and `requires_opt_in: bool = False`, with a
+  model-validator requiring `requires_opt_in: true` on any `eu_uk`
+  profile at config-load time. Named `legal_region`, not `region` —
+  `Business.region` already means state/province of a scraped address,
+  an unrelated concept. The actual refusal lives in
+  `db/orchestration.py`'s `build_send_jobs()`: it resolves each
+  message's campaign → `target_runs.profile_yaml` and excludes any
+  message whose profile is `legal_region: eu_uk` unconditionally —
+  `requires_opt_in` or not, logged at ERROR — because nothing in this
+  codebase collects or records consent anywhere, so the flag alone can
+  never make an eu_uk send actually legal. `api/targets.py`'s
+  scan-builder form gained the two fields (without this, making
+  `legal_region` required would have broken every create/edit
+  submission). Both real target profiles updated (`dentists-austin-tx`
+  → `us`, `dentists-gurugram` → `india`) since the field is now
+  required. DPDP's softer "prefer generic over named contacts"
+  preference is still unenforced — a real gap, but a soft one (not a
+  "refuses to run" hard rule), left for a follow-up. Verified against
+  real Postgres: a disposable `eu_uk`+`requires_opt_in: true` campaign
+  produced zero send jobs; a disposable `us` campaign was unaffected.
+- **docs/21** — `.github/workflows/ci.yml`: no CI existed at all before
+  this — `uv run pytest` only ran when a human remembered to. Now a
+  `postgres:16` service container + `uv sync` + `uv run pytest` + `uv
+  run alembic upgrade head` + `uv run alembic check` run on every push
+  to `main` and every pull request. The constituent commands were
+  verified against a real local dockerized Postgres (`alembic check` →
+  no drift, `pytest` → 263/263); the workflow file itself has not yet
+  been exercised by an actual GitHub Actions run, since that needs a
+  real push this session didn't make on its own initiative.
+- **docs/22** — a real Postgres-backed test tier, closing ROADMAP.md's
+  long-standing gap that `db/repository.py`, `db/persist.py`,
+  `db/campaigns.py`, `db/orchestration.py`, and every DB-backed `api/`
+  route had zero automated coverage (every real bug in them, docs/08
+  through docs/20, was caught by hand). `testcontainers[postgres]` (dev
+  dependency) spins up a completely separate, ephemeral Postgres 16 per
+  test session — deliberately never the dev `DATABASE_URL`, which holds
+  real send data. `tests/conftest.py` provides `db_session` (rolled
+  back per test via the SAVEPOINT recipe, even through a real
+  `session.commit()` in the code under test) and `db_env` (for real
+  API-route tests, since `session_scope()` is called directly rather
+  than via a FastAPI dependency, cleaned up with a real `TRUNCATE`
+  after). ~50 new tests, most notably a real two-thread concurrency
+  test proving `_reserve_fn`'s `pg_advisory_xact_lock` actually prevents
+  two racing workers from both sending against a mailbox's last cap
+  slot — deterministic (Postgres serialises the transactions, not
+  Python timing), not a flaky race. Degrades gracefully with no Docker:
+  confirmed `uv run pytest` still passes (263/263) with `DOCKER_HOST`
+  pointed at a nonexistent socket, this tier's ~50 tests skipping
+  rather than failing.
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
@@ -376,6 +431,14 @@ uv run alembic revision --autogenerate -m "..."   # after changing db/models.py
 uv run alembic check              # verify no drift between models.py and the migrations
 docker compose ps                 # confirm postgres/redis are healthy
 ```
+
+`uv run pytest` needs no setup and no running services for most of the
+suite. The `test_*_db.py` files (docs/22) are the exception: they spin
+up their own ephemeral Postgres via `testcontainers` (a completely
+separate container from `docker compose`'s dev Postgres — never point
+tests at the real `DATABASE_URL`, which holds real send data) and just
+skip themselves if Docker isn't reachable, so the rest of the suite
+still runs and passes either way.
 
 If `uv sync` or `uv python install` times out downloading a Python
 build, it's not blocked — this network has a slow start on large

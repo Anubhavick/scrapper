@@ -35,10 +35,12 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
+import yaml
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from leadgen.db.models import CampaignMailbox, Contact, Mailbox, Message
+from leadgen.config.models import TargetProfile
+from leadgen.db.models import Campaign, CampaignMailbox, Contact, Mailbox, Message, TargetRun
 from leadgen.db.repository import count_sent_today, fetch_suppressions
 from leadgen.send.crypto import TokenCipher
 from leadgen.send.gmail import build_raw_message, send_message
@@ -48,6 +50,36 @@ from leadgen.send.orchestrator import SendJob, SendResult, run_orchestration_loo
 logger = logging.getLogger(__name__)
 
 __all__ = ["build_send_jobs", "preview_approved_messages", "run_approved_messages"]
+
+
+def _legal_region_block_reason(session: Session, campaign_id, cache: dict) -> str | None:
+    """PROJECT.md's legal-posture table, enforced: an `eu_uk` target
+    profile is never sendable, `requires_opt_in: true` or not -- this
+    codebase has no opt-in/consent-collection mechanism anywhere (leads
+    come from public business listings, not a signup form), so there is
+    no way for a real send to actually satisfy GDPR here. `requires_opt_in`
+    (`config/models.py`) is enforced at config-load time so an eu_uk
+    profile at least makes the requirement visible in its YAML; this is
+    the actual send-time refusal PROJECT.md describes ("the send stage
+    refuses to run"). `cache` is a plain dict the caller keeps for the
+    life of one `build_send_jobs` call -- a target_run's `profile_yaml`
+    is an immutable snapshot (CLAUDE.md), so re-resolving it per message
+    in the same campaign would be wasted, repeated work, never a
+    freshness bug."""
+    if campaign_id not in cache:
+        profile_yaml = session.execute(
+            select(TargetRun.profile_yaml)
+            .join(Campaign, Campaign.target_run_id == TargetRun.id)
+            .where(Campaign.id == campaign_id)
+        ).scalar_one()
+        profile = TargetProfile.model_validate(yaml.safe_load(profile_yaml))
+        cache[campaign_id] = (
+            f"target profile legal_region={profile.legal_region!r} has no built "
+            "opt-in mechanism -- sends are blocked until one exists (see CLAUDE.md)"
+            if profile.legal_region == "eu_uk"
+            else None
+        )
+    return cache[campaign_id]
 
 
 def _reassign_if_mailbox_inactive(session: Session, message: Message, now: datetime) -> Mailbox | None:
@@ -112,7 +144,15 @@ def build_send_jobs(session: Session, *, campaign_id=None, reassign: bool = Fals
     every approved message system-wide. The per-mailbox daily cap this
     feeds into `preview_approved_messages()`/`run_approved_messages()`
     is still the mailbox's *global* `count_sent_today` either way -- the
-    cap is a property of the mailbox, not of any one campaign."""
+    cap is a property of the mailbox, not of any one campaign.
+
+    A message whose campaign's target profile is `legal_region: eu_uk` is
+    excluded here, logged at ERROR (not WARNING -- this is a compliance
+    block, not an operational one, unlike the inactive-mailbox exclusion
+    right below it), the same way an inactive mailbox with no reassignment
+    candidate is silently excluded (docs/19) -- see
+    `_legal_region_block_reason`'s docstring for why this can never be
+    unblocked by any flag on the profile itself."""
     conditions = [Message.status == "approved"]
     if campaign_id is not None:
         conditions.append(Message.campaign_id == campaign_id)
@@ -124,8 +164,13 @@ def build_send_jobs(session: Session, *, campaign_id=None, reassign: bool = Fals
     ).all()
 
     now = datetime.now(timezone.utc)
+    legal_region_cache: dict = {}
     jobs = []
     for message, contact in rows:
+        blocked_reason = _legal_region_block_reason(session, message.campaign_id, legal_region_cache)
+        if blocked_reason:
+            logger.error("message %s blocked (legal_region): %s", message.id, blocked_reason)
+            continue
         if reassign:
             mailbox = _reassign_if_mailbox_inactive(session, message, now)
         else:

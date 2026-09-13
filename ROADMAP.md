@@ -41,15 +41,30 @@ message says, or the next item in the backlog below —
 **`last_content_year`'s regex bug (item 2) shipped (docs/15)**,
 **the orchestration loop's preflight token-health check (item 4) shipped
 (docs/16)**, **web UI auth (item 5) shipped (docs/17)**, **mailbox
-health visibility (item 6) shipped, scoped down (docs/18)**, and **five
+health visibility (item 6) shipped, scoped down (docs/18)**, **five
 of item 8's smaller items shipped (docs/19)**: target-profile
 edit-in-place, pagination on `/runs`/`/targets`/`/campaigns`,
 bulk-approve, mailbox reassignment, and the orchestration loop's mid-run
-`is_active` re-check. Item 3 (step 7: bounce/reply monitoring) is
-blocked on a Google CASA review (deferred, per user decision on
-2026-09-13 — see below). What's left: item 7 (Google Places, "only
-worth it if Overpass coverage proves thin"), and item 8's one remaining
-bullet (Send UI progress/ETA/cancel/history).
+`is_active` re-check, and **the GDPR/DPDP legal-posture gap (item 9)
+shipped (docs/20)**: `legal_region` is now a required `TargetProfile`
+field and the send stage hard-refuses any `eu_uk` profile, regardless of
+`requires_opt_in`, since no opt-in mechanism exists to make a send
+actually legal. Item 3 (step 7: bounce/reply monitoring) is blocked on a
+Google CASA review (deferred, per user decision on 2026-09-13 — see
+below). **CI (item 11) shipped (docs/21)**: a GitHub Actions workflow
+now runs `pytest` + `alembic check` against a real Postgres service
+container on every push/PR — see docs/21 for the one thing about it
+that's still unverified (an actual triggered run). **The Postgres-backed
+test tier (item 12) shipped (docs/22)**: ~50 new tests against a real
+ephemeral testcontainers Postgres across `db/repository.py`,
+`db/persist.py`, `db/campaigns.py`, `db/orchestration.py`, and three
+DB-backed `api/` routers — including a real concurrency test proving
+the send-cap advisory lock actually prevents a double-send. What's left:
+item 7 (Google Places, "only worth it if Overpass coverage proves
+thin"), item 8's one remaining bullet (Send UI progress/ETA/cancel/
+history), and item 10 (the 200-rows checkpoint at real volume — skipped
+for now per user decision on 2026-09-13, revisit once there's a concrete
+new vertical/city to scan).
 
 Still worth doing at some point, not urgent: **click through the Send UI
 with an actual mouse in a browser** — its own verification (docs/13)
@@ -160,6 +175,53 @@ docs/09's and docs/11's `DetachedInstanceError` bugs were caught.
      just "reload the page and look at the messages table" — and no
      history of past send jobs beyond what `messages.status`/`sent_at`
      already record. Not part of docs/19's batch.
+9. ~~**GDPR/DPDP legal-posture enforcement was spec-only.**~~ **Done
+   (docs/20).** `TargetProfile.legal_region` (required, no default) +
+   `requires_opt_in`, validated at config-load time; the send stage
+   (`db/orchestration.py`'s `build_send_jobs()`) hard-refuses every
+   `eu_uk` message regardless of `requires_opt_in`, since no opt-in
+   mechanism exists anywhere in this system to make that flag actually
+   true. Verified against real Postgres: an eu_uk campaign produces zero
+   send jobs, a us campaign is unaffected. DPDP's softer "prefer generic
+   over named contacts" preference is still unenforced — noted in
+   docs/20, not fixed, to keep this change scoped to the one hard rule
+   that was actually missing.
+10. **The 200-rows-by-hand checkpoint only ever happened at 31 rows, for
+    one vertical (dentists, Austin TX — docs/07).** MANUAL.md already
+    flags this itself as worth redoing "at real volume before trusting
+    qualification broadly across other business types/cities" — it's
+    real advice sitting in a docs file, not a tracked backlog item, and
+    now that real campaigns actually go out the risk of a systematic
+    qualification bug in an untested vertical is real, not theoretical.
+    Needs a human to actually read output by hand (this is a judgment
+    call about lead quality, not something to automate); scoping which
+    business type/city to try next is a decision for whoever picks this
+    up, not made here.
+11. ~~**No CI.**~~ **Done (docs/21).** `.github/workflows/ci.yml`: a
+    real `postgres:16` service container, `uv sync`, `uv run pytest`,
+    then `uv run alembic upgrade head` + `uv run alembic check` — on
+    every push to `main` and every pull request. The constituent
+    commands were verified against a real local dockerized Postgres;
+    the workflow itself has not yet been exercised by an actual GitHub
+    Actions run (needs a real push to trigger) — see docs/21 for what
+    that leaves unverified.
+12. ~~**The DB-touching half of the codebase has zero automated
+    coverage, by construction.**~~ **Done (docs/22).**
+    `testcontainers[postgres]` (dev dependency) + `tests/conftest.py`:
+    an ephemeral Postgres 16 container per test session, migrated via
+    real Alembic history, never the dev `DATABASE_URL` (which holds
+    real send data). ~50 new tests across `test_repository_db.py`,
+    `test_persist_db.py`, `test_campaigns_db.py`,
+    `test_orchestration_db.py` (including a real two-thread concurrency
+    test proving `_reserve_fn`'s advisory lock actually prevents a
+    double-send under two racing workers — the property this whole
+    system's cap logic depends on, never exercised automatically
+    before), `test_campaigns_api_db.py`, `test_suppressions_api_db.py`,
+    and `test_review_api_db.py`. Degrades gracefully: confirmed `uv run
+    pytest` still passes (263/263, this tier's ~50 tests skipped) with
+    Docker unreachable. Runs automatically as part of item 11's CI job
+    (GitHub's `ubuntu-latest` runners have Docker available) — not yet
+    confirmed by an actual triggered run, same caveat as docs/21.
 
 ## Explicitly deferred, not forgotten
 

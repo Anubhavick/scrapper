@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A real Postgres, not SQLite -- db/models.py uses JSONB/UUID columns
+    # SQLite can't represent, and `alembic check` below needs a real
+    # database to compare current migration state against models.py.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: leadgen
+          POSTGRES_PASSWORD: leadgen
+          POSTGRES_DB: leadgen
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U leadgen"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://leadgen:leadgen@localhost:5432/leadgen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Python (per .python-version)
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run test suite
+        run: uv run pytest
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Check for drift between db/models.py and migrations
+        run: uv run alembic check

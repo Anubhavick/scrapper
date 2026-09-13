@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # The enrichment signals the crawler knows how to compute (PROJECT.md's
 # example list). Anything referenced outside this set in a profile's
@@ -32,6 +32,12 @@ KNOWN_SIGNALS = frozenset(
 )
 
 KNOWN_SOURCES = ("overpass", "places", "csv")
+
+# PROJECT.md's legal-posture table. Named `legal_region`, not `region` --
+# `Business.region` (db/models.py) already means "state/province of a
+# scraped address"; this is an unrelated, profile-level jurisdiction flag
+# and the two must never be confused.
+LegalRegion = Literal["us", "eu_uk", "india"]
 
 
 class ConfigError(Exception):
@@ -195,6 +201,36 @@ class TargetProfile(BaseModel):
     enrichment: Enrichment = Field(default_factory=Enrichment)
     qualification: Qualification = Field(default_factory=Qualification)
     outreach: Outreach
+
+    # No default on purpose (PROJECT.md's legal-posture table: "the
+    # target country is a config flag"). A silent default would mean an
+    # author who forgets this field gets whatever posture the default
+    # happens to be, unnoticed -- required forces the same explicit
+    # per-profile decision PROJECT.md describes, for every profile that
+    # has ever existed or ever will.
+    legal_region: LegalRegion
+    # GDPR/UK-GDPR ("eu_uk"): legitimate interest is contested and some
+    # member states are opt-in only. PROJECT.md requires a profile
+    # targeting that region to set this to True -- enforced below at
+    # load time -- but setting it True does NOT make a send legal by
+    # itself: nothing in this codebase actually collects or records
+    # consent (leads come from public business listings, not a signup
+    # form), so `db/orchestration.py`'s send path refuses to send for
+    # any eu_uk profile regardless of this flag, until a real opt-in
+    # mechanism exists. This field exists so the requirement is at
+    # least visible and auditable in the YAML, not to unlock sending.
+    requires_opt_in: bool = False
+
+    @model_validator(mode="after")
+    def _check_gdpr_opt_in(self) -> "TargetProfile":
+        if self.legal_region == "eu_uk" and not self.requires_opt_in:
+            raise ValueError(
+                "legal_region: eu_uk requires requires_opt_in: true "
+                "(PROJECT.md's legal-posture table) -- and even then, "
+                "the send stage still refuses to send for this region "
+                "until a real opt-in mechanism is built; see CLAUDE.md"
+            )
+        return self
 
 
 class BusinessTypeDef(BaseModel):

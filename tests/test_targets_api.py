@@ -55,6 +55,7 @@ def _write_target(name: str, **overrides) -> Path:
         "source": {"primary": "overpass"},
         "filters": {"exclude_domains": ["touchto.io"]},
         "outreach": {"offer_id": "appointment-automation", "sender_pool": ["sales1"]},
+        "legal_region": "us",
     }
     data.update(overrides)
     path = targets_mod.TARGETS_DIR / f"{name}.yaml"
@@ -71,6 +72,7 @@ VALID_FORM = {
     "radius_km": "10",
     "source_primary": "overpass",
     "max_results": "500",
+    "legal_region": "us",
     "min_name_length": "0",
     "crawl_pages": "/, /contact",
     "max_pages": "8",
@@ -167,6 +169,38 @@ def test_create_target_rejects_unknown_business_type(client: TestClient) -> None
 
     assert resp.status_code == 200
     assert "Unknown business_type" in resp.text
+
+
+def test_create_target_rejects_missing_legal_region(client: TestClient) -> None:
+    form = dict(VALID_FORM)
+    del form["legal_region"]
+
+    resp = client.post("/targets", data=form)
+
+    assert resp.status_code == 200
+    assert "legal_region" in resp.text
+    assert list(targets_mod.TARGETS_DIR.glob("*.yaml")) == []
+
+
+def test_create_target_rejects_eu_uk_without_opt_in(client: TestClient) -> None:
+    form = dict(VALID_FORM, legal_region="eu_uk")
+
+    resp = client.post("/targets", data=form)
+
+    assert resp.status_code == 200
+    assert "requires_opt_in" in resp.text
+    assert list(targets_mod.TARGETS_DIR.glob("*.yaml")) == []
+
+
+def test_create_target_accepts_eu_uk_with_opt_in(client: TestClient) -> None:
+    form = dict(VALID_FORM, legal_region="eu_uk", requires_opt_in="on")
+
+    resp = client.post("/targets", data=form, follow_redirects=False)
+
+    assert resp.status_code == 303
+    data = yaml.safe_load((targets_mod.TARGETS_DIR / "gyms-denver-co.yaml").read_text())
+    assert data["legal_region"] == "eu_uk"
+    assert data["requires_opt_in"] is True
 
 
 def test_create_target_rejects_bad_radius(client: TestClient) -> None:

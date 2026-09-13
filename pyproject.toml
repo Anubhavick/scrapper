@@ -23,6 +23,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]

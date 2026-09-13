@@ -17,6 +17,7 @@ def _profile(tmp_path: Path, **qualification_overrides):
         "location": {"mode": "radius", "center": "X", "radius_km": 10},
         "source": {"primary": "overpass"},
         "outreach": {"offer_id": "o", "sender_pool": ["s1"]},
+        "legal_region": "us",
         "qualification": {
             "require_email": True,
             "require_any_signal": ["no_online_booking", "no_contact_form"],

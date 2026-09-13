@@ -60,6 +60,7 @@ def _minimal_profile(**overrides) -> dict:
         "location": {"mode": "radius", "center": "X", "radius_km": 10},
         "source": {"primary": "overpass"},
         "outreach": {"offer_id": "o", "sender_pool": ["s1"]},
+        "legal_region": "us",
     }
     base.update(overrides)
     return base
@@ -159,6 +160,46 @@ def test_unknown_signal_in_qualification_raises(tmp_path: Path) -> None:
 
 def test_empty_sender_pool_raises(tmp_path: Path) -> None:
     data = _minimal_profile(outreach={"offer_id": "o", "sender_pool": []})
+    path = write_yaml(tmp_path / "p.yaml", data)
+    with pytest.raises(ConfigError):
+        load_target_profile(path, {"dentist": _dummy_business_type()})
+
+
+# ---- legal_region / GDPR opt-in gate ----
+
+
+def test_missing_legal_region_raises(tmp_path: Path) -> None:
+    data = _minimal_profile()
+    del data["legal_region"]
+    path = write_yaml(tmp_path / "p.yaml", data)
+    with pytest.raises(ConfigError, match="legal_region"):
+        load_target_profile(path, {"dentist": _dummy_business_type()})
+
+
+def test_eu_uk_without_requires_opt_in_raises(tmp_path: Path) -> None:
+    data = _minimal_profile(legal_region="eu_uk")
+    path = write_yaml(tmp_path / "p.yaml", data)
+    with pytest.raises(ConfigError, match="requires_opt_in"):
+        load_target_profile(path, {"dentist": _dummy_business_type()})
+
+
+def test_eu_uk_with_requires_opt_in_loads(tmp_path: Path) -> None:
+    data = _minimal_profile(legal_region="eu_uk", requires_opt_in=True)
+    path = write_yaml(tmp_path / "p.yaml", data)
+    profile = load_target_profile(path, {"dentist": _dummy_business_type()})
+    assert profile.legal_region == "eu_uk"
+    assert profile.requires_opt_in is True
+
+
+def test_us_profile_defaults_requires_opt_in_false(tmp_path: Path) -> None:
+    data = _minimal_profile(legal_region="us")
+    path = write_yaml(tmp_path / "p.yaml", data)
+    profile = load_target_profile(path, {"dentist": _dummy_business_type()})
+    assert profile.requires_opt_in is False
+
+
+def test_unknown_legal_region_raises(tmp_path: Path) -> None:
+    data = _minimal_profile(legal_region="mars")
     path = write_yaml(tmp_path / "p.yaml", data)
     with pytest.raises(ConfigError):
         load_target_profile(path, {"dentist": _dummy_business_type()})

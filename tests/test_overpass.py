@@ -75,6 +75,7 @@ def _profile(tmp_path: Path, **overrides):
         "location": {"mode": "radius", "center": "Gurugram", "radius_km": 15},
         "source": {"primary": "overpass", "max_results": 500},
         "outreach": {"offer_id": "o", "sender_pool": ["s1"]},
+        "legal_region": "india",
     }
     data.update(overrides)
     path = tmp_path / f"{uuid.uuid4()}.yaml"

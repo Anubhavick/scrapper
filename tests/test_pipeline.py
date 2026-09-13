@@ -52,6 +52,7 @@ def _profile(tmp_path: Path):
             "min_signal_count": 1,
         },
         "outreach": {"offer_id": "o", "sender_pool": ["s1"]},
+        "legal_region": "india",
     }
     path = tmp_path / "p.yaml"
     path.write_text(yaml.safe_dump(data))

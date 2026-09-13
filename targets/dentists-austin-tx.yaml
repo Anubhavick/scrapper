@@ -1,6 +1,9 @@
 name: dentists-austin-tx
 enabled: true
 
+# CAN-SPAM, per PROJECT.md's legal-posture table (US business, US leads).
+legal_region: us
+
 business_type: dentist
 
 location:

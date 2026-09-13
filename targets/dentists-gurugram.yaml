@@ -1,6 +1,9 @@
 name: dentists-gurugram
 enabled: true
 
+# DPDP, per PROJECT.md's legal-posture table (India business, India leads).
+legal_region: india
+
 business_type: dentist
 
 location:

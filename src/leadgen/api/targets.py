@@ -41,6 +41,7 @@ OFFERS_DIR = Path("config/offers")
 
 LOCATION_MODES = ["radius", "city", "bbox", "admin_area"]
 SIGNAL_OPTIONS = sorted(KNOWN_SIGNALS)
+LEGAL_REGIONS = ["us", "eu_uk", "india"]
 
 # Matches target-profile filenames: lowercase, digits, hyphens, so
 # `name` can never escape `targets/` (path traversal) or produce a
@@ -51,6 +52,8 @@ _DEFAULT_VALUES: dict = {
     "name": "",
     "enabled": True,
     "business_type": "",
+    "legal_region": "",
+    "requires_opt_in": False,
     "location_mode": "radius",
     "center": "",
     "radius_km": "",
@@ -120,6 +123,8 @@ def _values_from_form(form) -> dict:
         "name": (form.get("name") or "").strip(),
         "enabled": form.get("enabled") is not None,
         "business_type": form.get("business_type") or "",
+        "legal_region": form.get("legal_region") or "",
+        "requires_opt_in": form.get("requires_opt_in") is not None,
         "location_mode": form.get("location_mode") or "radius",
         "center": form.get("center") or "",
         "radius_km": form.get("radius_km") or "",
@@ -163,6 +168,8 @@ def _values_from_raw(raw: dict) -> dict:
         "name": raw.get("name", ""),
         "enabled": raw.get("enabled", True),
         "business_type": raw.get("business_type", ""),
+        "legal_region": raw.get("legal_region", ""),
+        "requires_opt_in": raw.get("requires_opt_in", False),
         "location_mode": location.get("mode", "radius"),
         "center": location.get("center", ""),
         "radius_km": _opt_str(location.get("radius_km")),
@@ -210,6 +217,8 @@ def _build_profile_dict(values: dict) -> dict:
         "name": values["name"],
         "enabled": bool(values["enabled"]),
         "business_type": values["business_type"],
+        "legal_region": values["legal_region"] or None,
+        "requires_opt_in": bool(values["requires_opt_in"]),
         "location": location,
         "source": source,
         "filters": {
@@ -471,6 +480,17 @@ def _render_form(
       {name_field}
       {_field_checkbox("enabled", "Enabled", values["enabled"])}
       {business_type_field}
+      {_field_select(
+          "legal_region", "Legal region / posture", [""] + LEGAL_REGIONS, values["legal_region"],
+          "Required -- no default. us = CAN-SPAM, eu_uk = GDPR, india = DPDP "
+          "(PROJECT.md's legal-posture table).",
+      )}
+      {_field_checkbox("requires_opt_in", "Requires opt-in (eu_uk only)", values["requires_opt_in"])}
+      <div class="help">
+        eu_uk profiles must check this to load at all -- but checking it does not unlock sending:
+        this system has no opt-in/consent-collection mechanism, so the send stage refuses to send
+        for any eu_uk profile regardless of this flag, until one exists (see CLAUDE.md).
+      </div>
     </fieldset>
 
     <fieldset>
