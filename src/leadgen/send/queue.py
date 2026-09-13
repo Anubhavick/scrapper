@@ -24,7 +24,18 @@ which takes a Postgres transaction-level advisory lock on the mailbox
 so two concurrent workers racing the same mailbox can't both observe
 "under cap" before either commits. Wrap the `sent_today_fn` passed to
 `send_next` around that, inside one transaction, rather than calling
-`count_sent_today` standalone, once an orchestrator actually exists.
+`count_sent_today` standalone (`send/orchestrator.py` does exactly this).
+
+Because `sent_today_fn` can carry that side effect, `send_next()` calls
+it strictly *after* confirming the email isn't suppressed, never as a
+sibling keyword-argument expression evaluated unconditionally alongside
+the suppression fetchers — Python evaluates keyword arguments eagerly,
+so building the old single `check_sendable(..., sent_today=sent_today_fn())`
+call would run the reservation even for a suppressed email, only to
+raise SendBlocked afterward. That would burn a real cap slot (and, for
+the reservation shape `db/orchestration.py` uses, wrongly mark a message
+"sent") for a contact this system must never actually contact. Suppression
+must be checked, and confirmed clear, before `sent_today_fn` ever runs.
 """
 
 from __future__ import annotations
@@ -50,7 +61,15 @@ __all__ = [
 
 class SendBlocked(Exception):
     """Raised instead of silently skipping a message, so a caller has to
-    look at (and log) why a send didn't happen."""
+    look at (and log) why a send didn't happen. `reason` lets an
+    orchestrating caller tell a per-message block (`"suppressed"` -- skip
+    this one, keep going) apart from a per-mailbox one (`"cap"` -- every
+    later message for this mailbox today will fail identically, so stop
+    without sleeping through the rest) without parsing the message text."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def check_sendable(
@@ -62,9 +81,9 @@ def check_sendable(
     daily_cap: int,
 ) -> None:
     if is_suppressed(email=email, suppressed_emails=suppressed_emails, suppressed_domains=suppressed_domains):
-        raise SendBlocked(f"{email} is suppressed")
+        raise SendBlocked(f"{email} is suppressed", reason="suppressed")
     if not can_send(sent_today, daily_cap):
-        raise SendBlocked(f"mailbox already sent {sent_today}/{daily_cap} today")
+        raise SendBlocked(f"mailbox already sent {sent_today}/{daily_cap} today", reason="cap")
 
 
 def random_delay_seconds() -> float:
@@ -88,14 +107,20 @@ def send_next(
     order, always. The fetchers are only called after `wait_before_next_send`
     returns, so a suppression or cap change that happens *during* the
     90-600s gap is seen before `send_fn` runs, not missed because the
-    state was read before the wait started. Raises SendBlocked (from
-    `check_sendable`) instead of sending if the fresh state says no."""
+    state was read before the wait started. Raises SendBlocked instead of
+    sending if the fresh state says no.
+
+    Suppression is checked, and confirmed clear, before `sent_today_fn`
+    is called at all — see the module docstring for why that order
+    matters once `sent_today_fn` carries a reservation side effect."""
     wait_before_next_send()
-    check_sendable(
+    if is_suppressed(
         email=email,
         suppressed_emails=suppressed_emails_fn(),
         suppressed_domains=suppressed_domains_fn(),
-        sent_today=sent_today_fn(),
-        daily_cap=daily_cap,
-    )
+    ):
+        raise SendBlocked(f"{email} is suppressed", reason="suppressed")
+    sent_today = sent_today_fn()
+    if not can_send(sent_today, daily_cap):
+        raise SendBlocked(f"mailbox already sent {sent_today}/{daily_cap} today", reason="cap")
     return send_fn()

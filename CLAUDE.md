@@ -7,11 +7,12 @@ this codebase*, not what it does.
 
 ## Current status
 
-Steps 1–6 are done and steps 3, 5, and 6 have now been verified against
-real external services, not just mocks — see the Verification note in
-each of docs/03, docs/06, and docs/07. Step 7 (bounce/reply monitoring)
-is untouched. Step 8 (FastAPI + review UI) is **partially** done: a
-lead-review UI exists (docs/07), a message-approval UI does not.
+Steps 1–6 are done, including the orchestration loop (docs/12) — and
+steps 3, 5, and 6 have now been verified against real external services,
+not just mocks — see the Verification note in each of docs/03, docs/06,
+docs/07, and docs/12. Step 7 (bounce/reply monitoring) is untouched.
+Step 8 (FastAPI + review UI) is done in substance: lead-review, run
+history, scan-builder, and campaigns + message-approval UIs all exist.
 
 - **Real, verified end-to-end:** `scripts/run_pipeline.py` against
   `targets/dentists-austin-tx.yaml` reaches live Overpass/Nominatim and
@@ -80,20 +81,47 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   editable while `queued` (`POST .../edit`, locked once approved — an
   edit request against an approved message is a silent no-op, verified),
   Approve/Reject per message, approving requires typing a name first
-  (`approved_by` unaudited otherwise). **Sends nothing** — no route here
-  calls `send/queue.py`/`send/gmail.py`; that's the orchestration loop,
-  still not built (below). Editing is manual text only, on purpose — see
-  docs/11 for why an LLM-assisted rewrite isn't wired in yet (constrained
-  rephrasing of the already-grounded line, never free drafting, is the
-  intended shape if it's ever built).
+  (`approved_by` unaudited otherwise). **Sends nothing itself** — no
+  route here calls `send/queue.py`/`send/gmail.py`; that's
+  `scripts/send_approved_messages.py` (below, docs/12), a separate
+  script, not a route in this module. Editing is manual text only, on
+  purpose — see docs/11 for why an LLM-assisted rewrite isn't wired in
+  yet (constrained rephrasing of the already-grounded line, never free
+  drafting, is the intended shape if it's ever built).
+- `src/leadgen/send/orchestrator.py` + `src/leadgen/db/orchestration.py`
+  + `scripts/send_approved_messages.py` (docs/12) — the orchestration
+  loop. `run_orchestration_loop()` (pure, tested) groups `approved`
+  messages by mailbox and drives each through `send/queue.py`'s
+  `send_next()` in turn; `db/orchestration.py` builds the jobs from
+  Postgres and implements the callables against a real Mailbox/Message/
+  Contact, including the `reserve_send_slot`-based reservation (mark the
+  message `sent` inside the advisory-locked transaction, before the
+  Gmail call — see docs/12 for why). The CLI script defaults to a
+  genuinely read-only preview (`preview_approved_messages()` — zero
+  writes); `--dry-run` runs the full loop for real (real reservation
+  writes, faked Gmail call — disposable test data only, never a real
+  campaign); `--live` plus typing back a confirmation phrase actually
+  sends. **The "dry run" default was itself a caught bug** (docs/12): the
+  first version defaulted to what's now `--dry-run`, which silently
+  flips every eligible message to `sent` even with no Gmail call —
+  "fakes the network call" isn't "makes no writes." Caught before any
+  real use, fixed by making the true no-op the default. **Also fixed a
+  real bug in `send/queue.py` while building this:** `send_next()` used to evaluate `sent_today_fn()` before
+  confirming suppression (Python evaluates keyword-argument expressions
+  eagerly), which would have let a side-effecting reservation run for a
+  suppressed contact before `check_sendable` ever raised for it. Fixed
+  by checking suppression first, inline, and only calling
+  `sent_today_fn()` once it's clear; `SendBlocked` also gained a
+  `reason` attribute (`"suppressed"` | `"cap"`) so a caller can tell a
+  per-message block from a per-mailbox one without parsing text.
+  Verified in dry-run mode against real Postgres (docs/12); never yet
+  run `--live`.
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
-  footgun); nothing orchestrates reading `approved` messages and actually
-  calling `send/queue.py` + `send/gmail.py` against them, respecting the
-  90–600s gap and re-checking suppression/caps immediately before each
-  send; bounce/reply monitoring (step 7, needs restricted
-  `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched.
+  footgun); bounce/reply monitoring (step 7, needs restricted
+  `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched; the
+  orchestration script has no preflight token-health check yet (docs/12).
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
 - `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
@@ -146,21 +174,20 @@ lead-review UI exists (docs/07), a message-approval UI does not.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step: the orchestration loop. All three UI pages the user
-asked for are done (history docs/09, scan-builder docs/10, campaigns +
-message approval docs/11) — there is now a real `messages` row with
-`status='approved'` sitting in Postgres with nothing that reads it. Build
-a process that queries `messages` where `status='approved'` and, for
-each one, calls `send/queue.py`'s `send_next()` (already implements the
-correct order: sleep the randomised 90-600s gap first, then re-fetch
-fresh suppression/cap state, then send), wrapping its `sent_today_fn`
-around `db/repository.py`'s `reserve_send_slot()` (the advisory-lock
-version, not a standalone `count_sent_today`) so two concurrent runs
-can't both observe "under cap." On success, transition the row to `sent`
-and set `sent_at`/`gmail_message_id`/`gmail_thread_id`. This is real,
-external, hard-to-reverse behavior -- build and test it against
-mocked/dry-run sends first, and do not point it at a real approved
-campaign without explicit confirmation.
+Next concrete step: **run `scripts/send_approved_messages.py --live`
+against a real approved campaign** — everything up to this is built and
+verified. This is real, external, hard-to-reverse behavior (real email
+to real business owners) and must not happen without the user explicitly
+confirming it first, on top of the script's own `--live` + typed-
+confirmation gate; do not run it yourself without that confirmation.
+
+After that (or if redirected before it), the backlog in priority order:
+suppression-list population (no bounce/reply monitoring exists yet to
+populate `suppressions` automatically, and there's no manual "add to
+suppression" UI either), the `last_content_year` regex bug (docs/07 —
+picks up a copyright-footer year as "fresh content"), then step 7
+(bounce/reply monitoring, needs a Google CASA review for the restricted
+`gmail.readonly`/`gmail.modify` scopes).
 
 ## Commands
 

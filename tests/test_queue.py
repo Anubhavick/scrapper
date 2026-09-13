@@ -14,7 +14,7 @@ def test_allows_send_when_not_suppressed_and_under_cap() -> None:
 
 
 def test_blocks_suppressed_email() -> None:
-    with pytest.raises(SendBlocked):
+    with pytest.raises(SendBlocked) as exc_info:
         check_sendable(
             email="lead@clinic.example",
             suppressed_emails={"lead@clinic.example"},
@@ -22,6 +22,7 @@ def test_blocks_suppressed_email() -> None:
             sent_today=0,
             daily_cap=50,
         )
+    assert exc_info.value.reason == "suppressed"
 
 
 def test_blocks_suppressed_domain() -> None:
@@ -36,7 +37,7 @@ def test_blocks_suppressed_domain() -> None:
 
 
 def test_blocks_when_over_daily_cap() -> None:
-    with pytest.raises(SendBlocked):
+    with pytest.raises(SendBlocked) as exc_info:
         check_sendable(
             email="lead@clinic.example",
             suppressed_emails=set(),
@@ -44,6 +45,7 @@ def test_blocks_when_over_daily_cap() -> None:
             sent_today=50,
             daily_cap=50,
         )
+    assert exc_info.value.reason == "cap"
 
 
 def test_suppression_checked_even_when_under_cap_and_vice_versa() -> None:

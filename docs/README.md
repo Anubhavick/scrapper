@@ -23,3 +23,4 @@ those two files distill from.
 | — | Run history UI: `/runs`, `/runs/{id}` -- browsing past scans from Postgres instead of a CSV | [09-run-history-ui.md](09-run-history-ui.md) |
 | — | Scan-builder UI: `/targets`, `/targets/new`, `/targets/{name}` -- a form that writes targets/*.yaml | [10-scan-builder-ui.md](10-scan-builder-ui.md) |
 | — | Campaigns + message approval: `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- target_run -> campaign -> rendered, human-approved messages | [11-campaigns-and-message-approval.md](11-campaigns-and-message-approval.md) |
+| — | Orchestration loop: reads `approved` messages, sends via Gmail respecting caps/suppression/the randomised gap | [12-orchestration-loop.md](12-orchestration-loop.md) |

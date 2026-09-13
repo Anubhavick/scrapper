@@ -108,18 +108,22 @@ target profile (YAML)
       ▼
 [5] REVIEW    ──► human approval      (mandatory)                          ← /campaigns/{id} (docs/11)
       ▼
-[6] SEND      ──► Gmail API, capped, randomised delays                     ← built, not wired up (no orchestration loop yet)
+[6] SEND      ──► Gmail API, capped, randomised delays                     ← built and wired up (docs/12); not yet run with --live
       ▼
 [7] MONITOR   ──► replies/bounces/unsubscribes → permanent suppression     ← not built
 ```
 
-Stages 1–5 are wired together today: 1–3 by `leadgen.pipeline.
+Stages 1–6 are wired together today: 1–3 by `leadgen.pipeline.
 run_target_profile()` (`scripts/run_pipeline.py`), 4–5 by
 `db/campaigns.py` + `api/campaigns.py` (docs/11) — a human can go from a
 target profile to an approved, exactly-as-will-be-sent message entirely
-through the UI. Stage 6 (`send/`) is a tested building block nothing
-calls yet — the orchestration loop is the actual next piece of work, not
-a missing capability (see §9).
+through the UI — and 6 by `scripts/send_approved_messages.py` (docs/12),
+which reads `approved` messages and sends them. Defaults to a genuinely
+read-only preview (no writes at all); `--dry-run` runs the full loop
+against disposable test data (fakes only the Gmail call — the
+reservation writes are real); `--live` is the real thing. Verified
+end-to-end against real Postgres in preview and `--dry-run` modes; not
+yet run with `--live` against a real campaign — see §9.
 
 ### 3.3 Where persistence fits (added after step 5, see docs/08)
 
@@ -161,10 +165,40 @@ considered and deliberately not built yet — see docs/11 for why any
 future version of that should stay constrained to rephrasing the
 already-signal-grounded line, not free drafting.
 
-**Still not built:** the orchestration loop that reads `status='approved'`
-messages and actually calls `send/queue.py` + `send/gmail.py` against
-them, respecting caps/suppression/the 90-600s delay. Nothing in
-`api/campaigns.py` sends anything — see §9's roadmap.
+**The orchestration loop that reads `status='approved'` messages and
+calls `send/queue.py` + `send/gmail.py` against them is now built**
+(§3.5, docs/12) — it's a separate script, not a route in
+`api/campaigns.py`; nothing in that module sends anything itself.
+
+### 3.5 The orchestration loop (docs/12)
+
+`scripts/send_approved_messages.py` (thin CLI) → `db/orchestration.py`
+(`build_send_jobs()`/`preview_approved_messages()`/`run_approved_messages()`,
+DB-touching glue) → `send/orchestrator.py`'s `run_orchestration_loop()`
+(pure decision logic, tested) → `send/queue.py`'s `send_next()` (sleep
+the 90-600s gap, re-check fresh state, send) for each `approved`
+message, one mailbox's queue at a time. The CLI has three modes: no
+flags calls `preview_approved_messages()`, a genuinely read-only summary
+(queued/sent-today/would-send-now/would-be-cap-blocked per mailbox, zero
+writes) — this is the safe default; `--dry-run` runs the *real* loop
+(sleeps, fresh suppression/cap checks, the reservation commit) with only
+the Gmail call faked, which still permanently flips eligible messages to
+`sent` in Postgres, so it's for disposable test data only, never a real
+campaign; `--live` plus typing back a confirmation phrase actually
+sends. (An earlier version made `--dry-run`'s behavior the CLI's
+default, which would have silently consumed a real campaign's messages
+the first time someone ran the script with no flags expecting a safe
+look — caught and fixed before any real use, see docs/12.) A cap-block
+stops the rest of that mailbox's queue (every later message would fail
+identically) without stopping other mailboxes; a suppression-block only
+skips that one message. The reservation that holds a cap slot against a
+concurrent worker is transitioning the message to `sent` *inside*
+`db.repository.reserve_send_slot`'s advisory-locked transaction, before
+the Gmail call — see docs/12 for why, and for the accepted failure mode
+(a `sent` message with `gmail_message_id` still null if the Gmail call
+itself then fails). Verified against real Postgres in preview mode
+(zero writes confirmed directly) and `--dry-run` mode (happy path, a
+suppression-block, and a cap-block); never yet run with `--live`.
 
 ## 4. Data model
 
@@ -209,12 +243,14 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `db/models.py` | Full SQLAlchemy schema | Done, migrated |
 | `compose/render.py` | Renders subject + one generated line from an offer template, grounded in a real signal | Done, tested. Raises rather than fabricating a generic line if no relevant signal is actually true |
 | `send/{crypto,oauth,gmail,caps,suppression,queue}.py` | Refresh-token encryption, Gmail OAuth flow (`gmail.send` only), MIME + actual send call, cap/suppression/delay decision logic | Done, tested; **verified against a real Gmail account** (a real message was sent and received) |
+| `send/orchestrator.py` | `run_orchestration_loop()` -- pure decision logic grouping approved sends by mailbox and driving each through `send_next()` (docs/12) | Done, tested (`tests/test_orchestrator.py`) |
 | `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done |
 | `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
 | `db/campaigns.py` | `create_campaign()` + `generate_campaign_messages()` -- turns a target_run's qualified leads into a campaign + one rendered message per business | Done, verified against real Postgres |
 | `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- edit a queued message's text, then Approve or Reject (edit locked once approved). Sends nothing itself | Done |
 | `api/nav.py` | Shared top-nav strip across all four pages | Done |
-| `api/` (rest) | Orchestration trigger (reads `approved` messages, calls `send/queue.py` + `send/gmail.py`) | **Not built** |
+| `db/orchestration.py` | `build_send_jobs()` + `preview_approved_messages()` (zero-write summary) + `run_approved_messages()` -- reads `approved` messages, drives `send/orchestrator.py` against real Postgres/Gmail (docs/12) | Done; **not covered by the automated test suite** (same JSONB/UUID reason as `db/repository.py`/`db/campaigns.py`) -- verified manually |
+| `scripts/send_approved_messages.py` | CLI entry point; no flags = read-only preview (default), `--dry-run` = full loop/fake Gmail/real reservation writes (test data only), `--live` + a typed confirmation phrase = actually send | Done; not yet run with `--live` |
 
 ## 6. Setup & running
 
@@ -257,19 +293,23 @@ large transfers, not a real block — retry with `UV_HTTP_TIMEOUT=240`.
 
 ## 7. Testing
 
-`uv run pytest` — 191 tests, all pure-function or mocked-`httpx`, zero
+`uv run pytest` — 196 tests, all pure-function or mocked-`httpx`, zero
 real network calls, zero real database. This is intentional and has a
-consequence worth knowing: two real modules
-(`db/repository.py`, `db/persist.py`) — and the `/runs`/`/runs/{id}`
-routes in `api/review.py` — are **not exercised by this suite at all**,
+consequence worth knowing: several real modules
+(`db/repository.py`, `db/persist.py`, `db/orchestration.py`) — and the
+`/runs`/`/runs/{id}` routes in `api/review.py` — are **not exercised by
+this suite at all**,
 because `db/models.py` uses Postgres-specific `JSONB`/`UUID` column types
 that SQLite can't stand in for. Those are verified by hand against a
 real, migrated Postgres instead — see the "Verification" section at the
-bottom of docs/06, docs/08, and docs/09 for what was actually run and
-what came back. Treat any change to those as unverified until you've done
-the same. (`_business_row_dict()`, the pure function that maps DB rows
-into the CSV-page's row-dict shape, *is* covered — see
-`test_business_row_dict_matches_csv_row_shape` in `test_review_api.py`.)
+bottom of docs/06, docs/08, docs/09, and docs/12 for what was actually
+run and what came back. Treat any change to those as unverified until
+you've done the same. (`_business_row_dict()`, the pure function that
+maps DB rows into the CSV-page's row-dict shape, *is* covered — see
+`test_business_row_dict_matches_csv_row_shape` in `test_review_api.py`;
+`send/orchestrator.py`'s decision logic is likewise covered despite
+`db/orchestration.py` not being, for the same reason — see
+`tests/test_orchestrator.py`.)
 
 Similarly, live network reachability (Overpass, Nominatim, real business
 websites, real Gmail) is confirmed by the manual verification runs
@@ -307,10 +347,11 @@ real send in a new region.
 
 ## 9. Current status (as of this writing)
 
-Build order steps 1–6 done; step 7 (bounce/reply) untouched; step 8
-(FastAPI UI) done in substance — lead review, run history, scan-builder,
-campaigns, and message approval all exist; only the orchestration loop
-that actually sends an approved message is missing.
+Build order steps 1–6 done, including the orchestration loop (docs/12,
+verified against real Postgres in preview and `--dry-run` mode, never
+yet run `--live`); step 7 (bounce/reply) untouched; step 8 (FastAPI UI)
+done in substance — lead review, run history, scan-builder, campaigns,
+and message approval all exist.
 
 Real, verified — not just passing mocked tests:
 
@@ -321,22 +362,25 @@ Real, verified — not just passing mocked tests:
 - The `/runs`/`/runs/{id}` run-history UI, including two real bugs a browser session (not the unit suite) caught: a `DetachedInstanceError` from reading an ORM attribute after its session closed, and FastAPI treating an empty-string `Form(...)` field as missing rather than empty (docs/09)
 - The `/targets` scan-builder UI: a real profile created through the form round-tripped through the actual `load_target_profile()` loader correctly typed, and create-only (never-overwrite) + filename-sanitisation behavior confirmed both by browser testing and by dedicated tests (docs/10)
 - The `/campaigns` + message-approval UI: a real campaign built from a real 6-qualified-lead run, all 6 messages rendered with correctly grounded text and addressed to each business's best contact, approve/reject verified end to end including the "must type a name to approve" guard — plus the same `DetachedInstanceError` class of bug as docs/09, caught the same way and fixed the same way (docs/11)
+- The orchestration loop: in `--dry-run` mode, a happy-path run (3 throwaway approved messages all correctly reserved/marked `sent`), a suppression-block (one message blocked and left `approved`, the rest of that mailbox's queue unaffected), and a cap-block (a message blocked with the mailbox's real `daily_cap` temporarily set to 1, left `approved` for a later run); separately, `preview_approved_messages()` confirmed to make zero writes (message statuses read identical before/after) with a correctly computed would-send/would-be-cap-blocked split — all against real Postgres, all cleaned up after (docs/12). Two real bugs found and fixed along the way: an ordering bug in `send/queue.py`'s `send_next()` (it evaluated `sent_today_fn()` before confirming suppression, which would have let a side-effecting reservation run for a suppressed contact), and the CLI originally defaulting to what it called a "dry run" that actually made real reservation writes — caught before any real use and replaced with a genuinely read-only default.
 
-The three-UI-page plan the user asked for is done: history/review
-(docs/09) → scan-builder (docs/10) → campaigns + message approval
-(docs/11). Not built, in priority order:
+Every step through message approval and the orchestration loop (built,
+not yet live) is done: history/review (docs/09) → scan-builder (docs/10)
+→ campaigns + message approval (docs/11) → orchestration loop (docs/12).
+Not built, in priority order:
 
-1. **The orchestration loop** — the one piece left before this system can
-   send a real campaign. Reads `messages` where `status='approved'` and
-   calls `send/queue.py`'s `send_next()` against each (already correctly
-   ordered: sleep the gap, re-check fresh state, then send), using
-   `db/repository.py`'s advisory-lock `reserve_send_slot()` so concurrent
-   runs can't both see "under cap." This is real, external,
-   hard-to-reverse behavior once pointed at a real campaign — test
-   against mocked/dry-run sends first.
-2. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+1. **Point the orchestration loop at a real campaign with `--live`.**
+   Everything is built and dry-run-verified (docs/12); this is the
+   actual first real send, a separate, explicitly-confirmed action from
+   building the capability.
+2. Suppression-list population — no bounce/reply monitoring exists yet
+   to populate `suppressions` automatically, and there's no manual
+   "add to suppression" UI either.
+3. The `last_content_year` regex bug (docs/07) — picks up a copyright
+   footer year as "fresh content."
+4. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
    the restricted `gmail.readonly`/`gmail.modify` scopes.
-3. Google Places as a second discover source (designed for in
+5. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

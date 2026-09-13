@@ -23,10 +23,11 @@ Step 6 added the Gmail OAuth flow, message composition, and the
 send-queue decision logic — verified end-to-end against a real Gmail
 account (a real message was actually sent and received). Step 8's full
 web UI now exists: browse/create target profiles, browse run history,
-and — as of the latest piece — build a campaign from a completed run and
-approve each rendered message by hand. What's still missing is the
-orchestration loop that reads an approved message and actually sends
-it — the one piece standing between this system and a real campaign.**
+and build a campaign from a completed run and approve each rendered
+message by hand. The orchestration loop that reads an approved message
+and actually sends it is now built too (docs/12) — dry-run-verified
+against real Postgres, but not yet run with `--live` against a real
+campaign. That's the last step before this system can send for real.**
 
 **Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
 hard gate — read 200 rows by hand *before* building anything past it,
@@ -87,7 +88,7 @@ What's done:
   suppression checks, and the 90–600s randomised gap between sends.
   **Verified against a real Gmail account** — `scripts/authorize_
   mailbox.py` + `scripts/send_test_email.py` sent and received a real
-  message. **Nothing orchestrates these into an actual send loop yet.**
+  message.
 - **Campaigns**: `leadgen.db.campaigns` + `leadgen.api.campaigns` — turn
   a completed target run's qualified leads into a `campaigns` row and
   one rendered `messages` row per business (addressed to its best
@@ -95,18 +96,32 @@ What's done:
   then approve or reject each one at `/campaigns/{id}`, full rendered
   text visible, approving requires typing a name first. Verified for
   real against a live Postgres run (docs/11).
-- 191 passing tests, all against mocked HTTP, pure functions, or static
+- **Orchestration loop**: `leadgen.send.orchestrator` (pure decision
+  logic) + `leadgen.db.orchestration` (DB glue) +
+  `scripts/send_approved_messages.py` (CLI) — reads `messages` where
+  `status='approved'`, sends each via `send_next()`'s sleep→re-check→send
+  order, using an advisory-lock reservation so concurrent runs can't
+  both see "under cap." Three modes: no flags is a genuinely read-only
+  preview (zero writes); `--dry-run` runs the real loop against
+  disposable test data (fakes only the Gmail call — the reservation
+  still really flips messages to `sent`); `--live` plus a typed
+  confirmation phrase actually sends. Verified against real Postgres in
+  both preview mode (confirmed zero writes) and `--dry-run` mode (happy
+  path, a suppression-block, a cap-block) (docs/12). **Not yet run with
+  `--live` against a real campaign.**
+- 196 passing tests, all against mocked HTTP, pure functions, or static
   fixtures — no real network calls in the test suite itself (real
   verification runs, listed above, were separate manual steps)
 
 What's not done, and things worth knowing before trusting this against
 real data or a real send:
 
-- **No orchestration loop.** There is now a real `messages` row with
-  `status='approved'` sitting in Postgres and nothing reads it — nothing
-  loops over approved messages calling `send.queue`/`send.gmail` yet.
-  This is the actual next piece of work, and the last one before a real
-  send is possible.
+- **The orchestration loop has never been run `--live`.** Everything
+  through message approval and the send loop itself is built and
+  verified against real Postgres (docs/12); pointing it at a real
+  campaign with a real Gmail send is a deliberate, separately-confirmed
+  next action, not
+  something this repo does on its own.
 - Bounce/reply monitoring (step 7) doesn't exist — needs the restricted
   `gmail.readonly`/`gmail.modify` scopes and a Google CASA review.
 - **Qualification has a documented, partially-closed gap.** Non-boolean
@@ -210,7 +225,7 @@ target profile (YAML)
       ▼
 [5] REVIEW    ──► human approval      (mandatory — nothing skips this)     -- /campaigns/{id}
       ▼
-[6] SEND      ──► Gmail API, capped, randomised delays                    -- built, no orchestration loop yet
+[6] SEND      ──► Gmail API, capped, randomised delays                    -- built (docs/12); dry-run-verified, not yet run --live
       ▼
 [7] MONITOR   ──► replies / bounces / unsubscribes → permanent suppression
 ```
@@ -252,7 +267,7 @@ before building anything past this point** — the point is to find out
 whether the data is good enough to justify building the sending half at
 all. That hand-review is a human task now, not a build step.
 
-### How sending automation works — approval built, orchestration not wired up yet
+### How sending automation works — approval and orchestration both built
 
 - Each **mailbox** (a team member's own Gmail account) authenticates via
   OAuth (`leadgen.send.oauth`, `gmail.send` scope only); the refresh
@@ -287,14 +302,24 @@ all. That hand-review is a human task now, not a build step.
   DPDP). Default posture is the strictest of the three. **This is not
   legal advice — verify before the first real send.**
 
-**What's missing to actually send anything**: an orchestration loop that
-reads `messages` rows with `status='approved'` and calls the pieces
-above in order for each one, respecting the daily cap and the randomised
-delay. Everything upstream of it — campaign creation, message rendering,
-human approval — is built and verified (docs/11). Real Google OAuth
-credentials and a `TOKEN_ENCRYPTION_KEY` already exist and have been
-verified against a real account (HOWTO.md, docs/06) — that part is no
-longer a blocker either.
+- **Orchestrate**: `scripts/send_approved_messages.py` reads `messages`
+  rows with `status='approved'` and calls the pieces above in order for
+  each one, one mailbox's queue at a time, stopping that mailbox's queue
+  on a cap-block (a suppression-block only skips the one message). No
+  flags: a genuinely read-only preview, zero writes. `--dry-run`: the
+  full loop for real (real reservation writes, faked Gmail call —
+  disposable test data only, this really consumes real approved messages
+  if pointed at them). `--live` plus typing back a confirmation phrase:
+  the real thing (docs/12).
+
+Everything through approval and orchestration — campaign creation,
+message rendering, human approval, and the send loop itself — is built
+and verified (docs/11, docs/12). Real Google OAuth credentials and a
+`TOKEN_ENCRYPTION_KEY` already exist and have been verified against a
+real account (HOWTO.md, docs/06). **The one thing that hasn't happened
+yet is running `scripts/send_approved_messages.py --live` against a real
+campaign** — a deliberate, separately-confirmed step, not a missing
+capability.
 
 ## Project layout
 
