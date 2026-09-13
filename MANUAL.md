@@ -305,7 +305,8 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
 | `db/campaigns.py` | `create_campaign()` + `generate_campaign_messages()` -- turns a target_run's qualified leads into a campaign + one rendered message per business | Done, verified against real Postgres |
 | `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- edit a queued message's text, then Approve or Reject (edit locked once approved). Also `/campaigns/{id}`'s **Send** section (docs/13): a read-only preview, and a confirm-phrase-gated button that enqueues `jobs.send_campaign_messages_job` via RQ (never inline -- see docs/13) | Done |
-| `api/nav.py` | Shared top-nav strip across all four pages | Done |
+| `api/suppressions.py` | Manual suppression-list UI (docs/14): `/suppressions` -- list + create-only add form, `value` normalised the same way `send/suppression.py` checks it, duplicate/malformed input rejected with a friendly error | Done; not covered by the automated suite (same reason as the other DB-touching `api/` modules) -- verified manually |
+| `api/nav.py` | Shared top-nav strip across all five pages | Done |
 | `db/orchestration.py` | `build_send_jobs()` + `preview_approved_messages()` (zero-write summary) + `run_approved_messages()` -- reads `approved` messages, drives `send/orchestrator.py` against real Postgres/Gmail (docs/12, docs/13); all three take an optional `campaign_id` filter | Done; **not covered by the automated test suite** (same JSONB/UUID reason as `db/repository.py`/`db/campaigns.py`) -- verified manually |
 | `scripts/send_approved_messages.py` | CLI entry point; no flags = read-only preview (default), `--dry-run` = full loop/fake Gmail/real reservation writes (test data only), `--live` + a typed confirmation phrase = actually send | Done; not yet run with `--live` |
 | `queue.py` | `get_queue()` -- RQ `Queue` bound to `REDIS_URL` (docs/13) | Done |
@@ -352,7 +353,7 @@ large transfers, not a real block — retry with `UV_HTTP_TIMEOUT=240`.
 
 ## 7. Testing
 
-`uv run pytest` — 197 tests, all pure-function or mocked-`httpx`, zero
+`uv run pytest` — 203 tests, all pure-function or mocked-`httpx`, zero
 real network calls, zero real database. This is intentional and has a
 consequence worth knowing: several real modules
 (`db/repository.py`, `db/persist.py`, `db/orchestration.py`) — and the
@@ -406,13 +407,13 @@ real send in a new region.
 
 ## 9. Current status (as of this writing)
 
-Build order steps 1–6 done, including the orchestration loop (docs/12)
-and a UI to trigger it per-campaign via a background RQ job (docs/13) —
-verified against real Postgres (+ Redis for docs/13) in preview and
-`--dry-run`/`live=False` modes, never yet run `--live`/`live=True`; step
-7 (bounce/reply) untouched; step 8 (FastAPI UI) done in substance — lead
-review, run history, scan-builder, campaigns, message approval, and now
-send-from-the-UI all exist.
+Build order steps 1–6 done, including the orchestration loop (docs/12),
+a UI to trigger it per-campaign via a background RQ job (docs/13), and
+**a real send has now actually happened** — see below; step 7
+(bounce/reply) untouched, though a manual suppression-list UI exists now
+too (docs/14); step 8 (FastAPI UI) done in substance — lead review, run
+history, scan-builder, campaigns, message approval, send-from-the-UI,
+and suppressions all exist.
 
 Real, verified — not just passing mocked tests:
 
@@ -424,28 +425,23 @@ Real, verified — not just passing mocked tests:
 - The `/targets` scan-builder UI: a real profile created through the form round-tripped through the actual `load_target_profile()` loader correctly typed, and create-only (never-overwrite) + filename-sanitisation behavior confirmed both by browser testing and by dedicated tests (docs/10)
 - The `/campaigns` + message-approval UI: a real campaign built from a real 6-qualified-lead run, all 6 messages rendered with correctly grounded text and addressed to each business's best contact, approve/reject verified end to end including the "must type a name to approve" guard — plus the same `DetachedInstanceError` class of bug as docs/09, caught the same way and fixed the same way (docs/11)
 - The orchestration loop: in `--dry-run` mode, a happy-path run (3 throwaway approved messages all correctly reserved/marked `sent`), a suppression-block (one message blocked and left `approved`, the rest of that mailbox's queue unaffected), and a cap-block (a message blocked with the mailbox's real `daily_cap` temporarily set to 1, left `approved` for a later run); separately, `preview_approved_messages()` confirmed to make zero writes (message statuses read identical before/after) with a correctly computed would-send/would-be-cap-blocked split — all against real Postgres, all cleaned up after (docs/12). Two real bugs found and fixed along the way: an ordering bug in `send/queue.py`'s `send_next()` (it evaluated `sent_today_fn()` before confirming suppression, which would have let a side-effecting reservation run for a suppressed contact), and the CLI originally defaulting to what it called a "dry run" that actually made real reservation writes — caught before any real use and replaced with a genuinely read-only default.
-- The campaigns UI's Send section: an RQ job enqueued and run to completion (`--burst` worker) against a real, throwaway approved message with `live=False`, including the real 90-600s sleep (not patched out) and a correct `sent`/null-`gmail_message_id` reservation afterward (docs/13). A macOS-only `rq worker` fork-safety crash was hit and worked around (`OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`), not a bug in this codebase. Two more real bugs found and fixed: an overlapping-run double-send gap (`_reserve_fn` now re-checks the message is still `approved` under the lock before reserving it) and `send/orchestrator.py`'s broad exception handler silently swallowing RQ's own `JobTimeoutException` (which would have let a job run forever past its `job_timeout` instead of being killed) — both closed, the second covered by a new pure test. Not yet clicked through in an actual browser.
+- The campaigns UI's Send section: an RQ job enqueued and run to completion (`--burst` worker) against a real, throwaway approved message with `live=False`, including the real 90-600s sleep (not patched out) and a correct `sent`/null-`gmail_message_id` reservation afterward (docs/13). A macOS-only `rq worker` fork-safety crash was hit and worked around (`OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`), not a bug in this codebase. Two more real bugs found and fixed: an overlapping-run double-send gap (`_reserve_fn` now re-checks the message is still `approved` under the lock before reserving it) and `send/orchestrator.py`'s broad exception handler silently swallowing RQ's own `JobTimeoutException` (which would have let a job run forever past its `job_timeout` instead of being killed) — both closed, the second covered by a new pure test.
+- **The first real send.** A real campaign (`dentists-austin-tx-round-1`, 6 real qualified Austin dentist leads from the existing `dentists-austin-tx` run) was built, one message (Austin Cosmetic Dentistry) was reviewed and approved by the user in the actual browser, and sent for real via the campaigns page's Start sending button + an `rq worker` — a real `gmail_message_id` landed in Postgres. Confirms the whole discover → crawl → qualify → compose → approve → send chain works end to end with real data. The other 5 messages in that campaign are untouched (`queued`, never approved).
+- The manual suppression-list UI (docs/14): add/duplicate-rejection/malformed-input all verified against the live server, `value` confirmed to normalise the same way `send/suppression.py` checks it (a full URL for a domain suppression resolves to the same string a real crawled site's domain would). A second instance of docs/09's `Form(...)`-empty-string bug caught and fixed the same way.
 
-Every step through message approval, the orchestration loop, and sending
-from the UI (built, not yet live) is done: history/review (docs/09) →
+Every step through message approval, the orchestration loop, sending
+from the UI, and manual suppression is done: history/review (docs/09) →
 scan-builder (docs/10) → campaigns + message approval (docs/11) →
-orchestration loop (docs/12) → send-from-the-UI (docs/13). Not built, in
-priority order:
+orchestration loop (docs/12) → send-from-the-UI (docs/13) →
+suppression-list UI (docs/14). Not built, in priority order:
 
-1. **Point the orchestration loop at a real campaign — either
-   `--live` from the terminal, or "Start sending" on `/campaigns/{id}`
-   with the RQ worker running.** Everything is built and verified in
-   preview/dry-run/`live=False` modes (docs/12, docs/13); this is the
-   actual first real send, a separate, explicitly-confirmed action from
-   building the capability.
-2. Suppression-list population — no bounce/reply monitoring exists yet
-   to populate `suppressions` automatically, and there's no manual
-   "add to suppression" UI either.
-3. The `last_content_year` regex bug (docs/07) — picks up a copyright
+1. The `last_content_year` regex bug (docs/07) — picks up a copyright
    footer year as "fresh content."
-4. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
-   the restricted `gmail.readonly`/`gmail.modify` scopes.
-5. Google Places as a second discover source (designed for in
+2. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+   the restricted `gmail.readonly`/`gmail.modify` scopes. Would give
+   `suppressions` its automatic writer; docs/14's UI is the manual
+   stopgap until then.
+3. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

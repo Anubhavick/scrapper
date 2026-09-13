@@ -9,12 +9,16 @@ this codebase*, not what it does.
 
 Steps 1–6 are done, including the orchestration loop (docs/12) and a way
 to trigger it from the campaigns UI via a background RQ job instead of a
-terminal (docs/13) — and steps 3, 5, and 6 have now been verified against
-real external services, not just mocks — see the Verification note in
-each of docs/03, docs/06, docs/07, docs/12, and docs/13. Step 7
-(bounce/reply monitoring) is untouched. Step 8 (FastAPI + review UI) is
-done in substance: lead-review, run history, scan-builder, and
-campaigns + message-approval UIs all exist.
+terminal (docs/13) — **and a real send has actually happened** (2026-09-13,
+a real approved message to a real Austin dentist practice, real
+`gmail_message_id` recorded — see ROADMAP.md's status section). Steps 3,
+5, and 6 have been verified against real external services, not just
+mocks — see the Verification note in each of docs/03, docs/06, docs/07,
+docs/12, docs/13, and docs/14. Step 7 (bounce/reply monitoring) is
+untouched, though a manual suppression-list UI exists now (docs/14) as
+the stopgap until it does. Step 8 (FastAPI + review UI) is done in
+substance: lead-review, run history, scan-builder, campaigns +
+message-approval, and suppressions UIs all exist.
 
 - **Real, verified end-to-end:** `scripts/run_pipeline.py` against
   `targets/dentists-austin-tx.yaml` reaches live Overpass/Nominatim and
@@ -151,6 +155,22 @@ campaigns + message-approval UIs all exist.
   Verified against real Postgres + Redis with `live=False` (RQ `--burst`
   worker, including the real 90-600s sleep running uninterrupted); not
   yet clicked through in an actual browser.
+- `src/leadgen/api/suppressions.py` (docs/14) — `/suppressions`: list +
+  create-only add form for `suppressions`, the manual lever for a reply
+  asking to stop contact before step 7's automatic bounce/reply
+  monitoring exists. `value` normalised exactly how `send/suppression.py`
+  reads it at real send time (`_normalise_email()` for `scope=email`,
+  the existing `util/domains.normalise_domain()` for `scope=domain`);
+  duplicate `(scope, value)` rejected with a friendly message, checked
+  before insert. No delete/edit route — a suppression is meant to be a
+  permanent record, same reasoning as target profiles being create-only
+  (docs/10). Caught a second instance of docs/09's `Form(...)`-treats-
+  empty-string-as-missing bug while verifying against the live server
+  (`reason` submitted empty raised a raw 422 instead of reaching this
+  route's own validation); fixed the same way, `Form("")` + manual
+  emptiness check. Verified against real Postgres via direct HTTP
+  requests: add, normalise, duplicate-reject, malformed-input-reject,
+  all confirmed live.
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
@@ -209,18 +229,19 @@ campaigns + message-approval UIs all exist.
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step: **trigger a real send against a real approved
-campaign** — either `scripts/send_approved_messages.py --live` from a
-terminal, or the "Start sending" button on `/campaigns/{id}` (needs an
-`rq worker` running, docs/13). Everything up to this is built and
-verified. This is real, external, hard-to-reverse behavior (real email
-to real business owners) and must not happen without the user explicitly
-confirming it first, on top of either path's own confirmation gate; do
-not trigger it yourself without that confirmation.
+**The first real send has happened** (2026-09-13) — a real approved
+message to a real Austin dentist practice, sent via the campaigns UI's
+Start sending button + an `rq worker`, real `gmail_message_id` recorded.
+The system works end to end with real data, not just fixtures. Every
+future real send still needs the same explicit human confirmation
+(neither `--live` nor the UI's confirm-phrase gate should ever be
+triggered on a Claude session's own initiative) — this note records that
+it has now been proven to work, not that the confirmation requirement
+is relaxed going forward.
 
-Full backlog after that, in priority order, with reasoning: **[ROADMAP.md](ROADMAP.md)**
-— keep it updated as items ship or new ones are found, don't just leave
-status in chat history.
+Next concrete step and the full backlog, in priority order, with
+reasoning: **[ROADMAP.md](ROADMAP.md)** — keep it updated as items ship
+or new ones are found, don't just leave status in chat history.
 
 ## Commands
 

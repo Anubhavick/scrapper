@@ -27,10 +27,11 @@ and build a campaign from a completed run and approve each rendered
 message by hand. The orchestration loop that reads an approved message
 and actually sends it is now built (docs/12), and so is a way to
 trigger it from the campaigns page itself via a background job
-(docs/13) instead of a terminal. Verified against real Postgres (+
-Redis for the UI path) in preview/dry-run modes, but not yet run for
-real against a real campaign. That's the last step before this system
-can send for real.**
+(docs/13) instead of a terminal. A real send has now happened — a real
+approved message to a real Austin dentist practice, sent via the
+campaigns UI, real Gmail message id recorded. A manual suppression-list
+page (docs/14) and a one-command `scripts/dev.sh` for local setup round
+out the current state.**
 
 **Worth knowing:** PROJECT.md's build order frames step 5's CSV as a
 hard gate — read 200 rows by hand *before* building anything past it,
@@ -122,7 +123,7 @@ What's done:
   in burst mode, including the real 90–600s sleep running for real
   (docs/13). Two more real concurrency/correctness bugs found and fixed
   while building it — see docs/13.
-- 197 passing tests, all against mocked HTTP, pure functions, or static
+- 203 passing tests, all against mocked HTTP, pure functions, or static
   fixtures — no real network calls in the test suite itself (real
   verification runs, listed above, were separate manual steps)
 

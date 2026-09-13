@@ -9,49 +9,50 @@ For *why* any shipped decision looks the way it does, see the matching
 `docs/NN-*.md` file. For the full current-state map, see
 [MANUAL.md](MANUAL.md) and [CLAUDE.md](CLAUDE.md).
 
-## Status: everything through the send loop is built, from a terminal or the UI. Nothing has sent for real yet.
+## Status: the first real send has happened. The system works end to end.
 
 ```
 DISCOVER → CRAWL → QUALIFY → COMPOSE → REVIEW → SEND → MONITOR
-   ✅        ✅        ✅        ✅        ✅      ⚠️       ❌
-                                                 built,
-                                              never run
-                                             for real yet
+   ✅        ✅        ✅        ✅        ✅      ✅       ❌
+                                                 real send
+                                                confirmed
 ```
 
-SEND is reachable two ways now: `scripts/send_approved_messages.py
---live` (every approved message, system-wide) or the "Start sending"
-button on `/campaigns/{id}` (one campaign, backed by an `rq worker`
-background job so the button doesn't block on hours of sleeping between
-messages — docs/13). Neither has been used for a real send yet.
+2026-09-13: a real campaign (`dentists-austin-tx-round-1`, 6 real
+qualified Austin dentist leads) was built from the existing
+`dentists-austin-tx` run, one message (Austin Cosmetic Dentistry) was
+reviewed and approved by the user in the actual browser UI, and sent for
+real via the campaigns page's **Start sending** button + an `rq worker`
+— a real Gmail message id was recorded
+(`messages.gmail_message_id`), confirming the whole discover → crawl →
+qualify → compose → approve → send chain works with real data, not just
+disposable fixtures. The other 5 messages in that campaign are still
+`queued` (never approved), untouched.
+
+`scripts/dev.sh up` (docs/13/HOWTO.md) now starts everything (docker +
+migrations + web UI + worker) in one command instead of four separate
+manual ones.
 
 ## Immediate next step
 
-**Trigger a real send against a real approved campaign** — either
-`scripts/send_approved_messages.py --live` from a terminal, or "Start
-sending" on `/campaigns/{id}` with an `rq worker` running. Everything up
-to this is built and verified against real Postgres (+ Redis for the UI
-path) in preview/dry-run/`live=False` modes (docs/12, docs/13). This is
-real, external, hard-to-reverse behavior — it emails real business
-owners — so it needs an explicit human decision each time, not something
-any Claude session should do on its own initiative. Both paths require
-their own confirmation gate (a typed phrase) on top of that.
+Nothing is blocking on a decision right now. Pick up wherever the next
+message says, or the next item in the backlog below —
+**suppression-list population (item 1) shipped (docs/14)**, so item 2
+(`last_content_year`'s regex bug) is next up.
 
-Worth doing before that first real send: **click through the new Send
-UI in an actual browser** (page render, the confirm-phrase rejection
-path, the "already running" guard) — it's only been verified by running
-the underlying job directly, not through the web form itself, unlike
-every other UI page in this repo which caught real bugs exactly this way
-(docs/09, docs/11).
+Still worth doing at some point, not urgent: **click through the Send UI
+with an actual mouse in a browser** — its own verification (docs/13)
+used direct HTTP requests because a real Playwright session was locked
+by another concurrent session at the time, not literal clicks the way
+docs/09's and docs/11's `DetachedInstanceError` bugs were caught.
 
 ## Backlog, roughly in priority order
 
-1. **Suppression-list population.** The hard rule checks `suppressions`
-   before every send, but nothing writes to it yet. No bounce/reply
-   monitoring (item 3 below) and no manual "add to suppression list" UI
-   either — right now the only lever is a raw DB insert. Worth a small
-   manual-add UI even before step 7 exists, since replies asking to stop
-   contact can happen before any monitoring is built.
+1. ~~**Suppression-list population.**~~ **Done (docs/14).** `/suppressions`
+   -- create-only, `value` normalised the same way the real send path
+   checks it, duplicate/malformed input rejected with a friendly error
+   instead of a 500. Still no *automatic* writer (that's step 7, below)
+   -- this is the manual lever for a reply that arrives before then.
 2. **`last_content_year`'s regex bug** (flagged since docs/07, still
    unfixed). It regexes a whole page for the largest 4-digit year and
    reliably mistakes a copyright-footer year for real content freshness.

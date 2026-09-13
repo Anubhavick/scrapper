@@ -8,6 +8,7 @@ _PAGES = [
     ("/targets", "Targets"),
     ("/runs", "Run history"),
     ("/campaigns", "Campaigns"),
+    ("/suppressions", "Suppressions"),
     ("/", "Lead review (CSV)"),
 ]
 
