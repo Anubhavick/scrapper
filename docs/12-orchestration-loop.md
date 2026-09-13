@@ -109,8 +109,10 @@ two workers could both read "39/40 sent" before either commits.
 `tests/test_orchestrator.py`, plus 2 new assertions on `SendBlocked.reason`
 in `tests/test_queue.py`).
 
-Verified for real against the live Postgres from docs/08–11's runs, dry
-run only (`dry_run=True` — no Gmail call was made in any of this):
+Verified for real against the live Postgres from docs/08–11's runs. No
+Gmail call was made in any of this — items 1–3 used `dry_run=True`
+(fakes only the Gmail call, real reservation writes), item 4 used the
+genuinely no-write `preview_approved_messages()`:
 
 1. **Happy path.** Created a throwaway target_run/campaign/3 messages,
    all `approved`, assigned to the real `sales1` mailbox. Ran
@@ -167,6 +169,7 @@ this doc's own verification pass — `Preview Test Biz`/
 - **Not scheduled.** This is a script a human runs, on purpose, until
   step 7 (bounce/reply monitoring, still unbuilt) exists — no cron/RQ
   job invokes it automatically yet.
-- **Never run with `--live`.** Every verification above used
-  `dry_run=True` against throwaway data. This has not been pointed at a
-  real campaign yet — that's a separate, explicitly-confirmed step.
+- **Never run with `--live`.** Every verification above used the
+  no-write preview or `--dry-run` against throwaway data. This has not
+  been pointed at a real campaign yet — that's a separate,
+  explicitly-confirmed step.

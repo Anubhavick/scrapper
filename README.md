@@ -13,7 +13,7 @@ commands, step by step, from a fresh clone to a real test email:
 [HOWTO.md](HOWTO.md).** Notes for anyone (human or Claude) working in
 this codebase: [CLAUDE.md](CLAUDE.md). A running build log, one file per
 completed step with the reasoning behind every non-obvious decision:
-[docs/](docs/).
+[docs/](docs/). **What's left and in what order: [ROADMAP.md](ROADMAP.md).**
 
 ## Status: build order steps 1–6 done, step 8 done, out of 9
 

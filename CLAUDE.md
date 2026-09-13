@@ -181,13 +181,9 @@ to real business owners) and must not happen without the user explicitly
 confirming it first, on top of the script's own `--live` + typed-
 confirmation gate; do not run it yourself without that confirmation.
 
-After that (or if redirected before it), the backlog in priority order:
-suppression-list population (no bounce/reply monitoring exists yet to
-populate `suppressions` automatically, and there's no manual "add to
-suppression" UI either), the `last_content_year` regex bug (docs/07 —
-picks up a copyright-footer year as "fresh content"), then step 7
-(bounce/reply monitoring, needs a Google CASA review for the restricted
-`gmail.readonly`/`gmail.modify` scopes).
+Full backlog after that, in priority order, with reasoning: **[ROADMAP.md](ROADMAP.md)**
+— keep it updated as items ship or new ones are found, don't just leave
+status in chat history.
 
 ## Commands
 
