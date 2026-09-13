@@ -9,6 +9,20 @@ one.
 For *what's built and why*, see [README.md](README.md) / [MANUAL.md](MANUAL.md);
 for the reasoning behind any non-obvious decision, see [docs/](docs/).
 
+**Fast path, once Part A's one-time setup is done:**
+
+```bash
+scripts/dev.sh up      # docker + migrations + web UI + worker, one shot; opens the browser
+scripts/dev.sh status  # what's currently running
+scripts/dev.sh logs    # tail the web UI's and worker's output
+scripts/dev.sh down    # stop everything cleanly
+```
+
+This replaces manually running `docker compose up -d`, `alembic upgrade
+head`, `uvicorn ...`, and `rq worker ...` in separate terminals every
+time (Part B's setup step below still explains what each piece does and
+how to run them by hand, if you ever need to).
+
 Two parts:
 
 - **Part A — one-time setup.** Do this once per machine / once per
@@ -136,6 +150,11 @@ mailbox authorized.** Everything below is the workflow you repeat.
 ---
 
 # Part B — the per-campaign workflow
+
+**Shortcut: `scripts/dev.sh up` does everything below (web UI + worker,
+both backgrounded) in one command and opens the browser for you** — skip
+to B1 if you use it. The manual steps below are what it's running under
+the hood, useful if you want them in foreground terminals instead.
 
 Start the web UI once per terminal session — it stays running in its
 own terminal while you use the rest of this section from a browser:
@@ -283,9 +302,12 @@ be contacted again.
 
 | I want to... | Run this |
 |---|---|
-| Confirm Postgres/Redis are up | `docker compose ps` |
-| Start the web UI | `uv run uvicorn leadgen.api.review:app --reload` |
-| Start the background worker (needed for the UI's Send button) | `uv run rq worker leadgen -u redis://localhost:6379/0` |
+| Start everything (docker + migrations + web UI + worker) | `scripts/dev.sh up` |
+| Stop everything cleanly | `scripts/dev.sh down` |
+| See what's running / tail logs | `scripts/dev.sh status` / `scripts/dev.sh logs` |
+| Confirm Postgres/Redis are up (manual) | `docker compose ps` |
+| Start the web UI (manual) | `uv run uvicorn leadgen.api.review:app --reload` |
+| Start the background worker (manual, needed for the UI's Send button) | `uv run rq worker leadgen -u redis://localhost:6379/0` |
 | Run a new scan | `uv run python scripts/run_pipeline.py targets/<profile>.yaml leads.csv` |
 | Check what would send, safely | `uv run python scripts/send_approved_messages.py` |
 | Test the send loop, disposable data only | `uv run python scripts/send_approved_messages.py --dry-run` |

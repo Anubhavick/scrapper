@@ -34,3 +34,6 @@ leads*.csv
 
 # Playwright MCP browser-testing snapshots
 .playwright-mcp/
+
+# scripts/dev.sh local process state (pid files, logs)
+.dev/
