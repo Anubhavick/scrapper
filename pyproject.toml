@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.9",
     "pyyaml>=6.0",
     "cryptography>=43.0",
+    "python-multipart>=0.0.9",
 ]
 
 [dependency-groups]
