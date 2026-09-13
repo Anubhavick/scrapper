@@ -19,3 +19,4 @@ those two files distill from.
 | 5 | Filters, qualification, CSV export — the discover→enrich→CSV pipeline | [05-csv-export-and-qualification.md](05-csv-export-and-qualification.md) |
 | 6 | Gmail OAuth, compose, and send-queue decision logic (caps + suppression) | [06-gmail-oauth-and-send-queue.md](06-gmail-oauth-and-send-queue.md) |
 | 8 | Lead-review UI (scoped down), crawl_status/tag-dedup fixes from reading real data | [07-review-ui.md](07-review-ui.md) |
+| — | Postgres persistence: pipeline.py -> businesses/contacts/enrichment_signals/target_runs | [08-persistence.md](08-persistence.md) |

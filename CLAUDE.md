@@ -80,21 +80,34 @@ lead-review UI exists (docs/07), a message-approval UI does not.
   the actual discover→filter→crawl→qualify→CSV wiring, now also emitting
   a `crawl_status` column (`ok`/`partial`/`unreachable`/`no_website`,
   docs/07) so an unreachable site is distinguishable from one with
-  genuinely empty signals. **Still no database** — this returns
-  in-memory rows and writes a CSV file directly; nothing here (or
-  anywhere yet) upserts into
-  `businesses`/`contacts`/`enrichment_signals`/`crawl_cache`. That
-  persistence layer is intentionally deferred past step 5.
+  genuinely empty signals. **Now optionally persists** (docs/08): pass
+  `session=`/`target_name=`/`profile_yaml_text=` and it upserts
+  `businesses`/`contacts`/`enrichment_signals` and creates/finishes a
+  `target_runs` row as it goes, via `src/leadgen/db/persist.py`. Without
+  a session it's unchanged — CSV-only, no DB dependency.
+  `scripts/run_pipeline.py` persists by default now; `--no-db` reverts
+  to the old behaviour. `campaigns`/`messages` are still untouched —
+  nothing yet turns a `target_run` into something a human approves.
+  **Real bug worth knowing:** `businesses.normalized_domain`'s partial
+  unique index breaks on a real multi-location chain sharing one domain
+  (two actual "River Rock Dental" branches in the Austin data) —
+  `upsert_business()` now leaves the second one's `normalized_domain`
+  null rather than crash the run; see docs/08 for why and its accepted
+  nondeterminism (which location "wins" the slot depends on discover()
+  row order).
 - Postgres 16 + Redis via docker-compose, Alembic wired up (schema
   exists and is migrated, just not written to by any code yet).
 - `docs/` has one file per completed build-order step — check there for
   the full reasoning behind any non-obvious decision before redoing it.
 
-Next concrete step: build the orchestration loop (CSV/DB → `campaigns`/
-`messages` rows, then a loop calling `send/queue.py` + `send/gmail.py`
-against approved ones) and the message-approval UI that has to sit in
-front of it — the hard rule about human approval has nothing to click
-until both exist.
+Next concrete step: campaigns. Turn a `target_run` into a `campaigns` row
+(offer + sender pool), generate `queued` `messages` rows for its
+qualified contacts via `compose/render.py` (already built), extend the
+review UI (or a new page) to let a human drop leads from the campaign and
+approve each rendered message, then the orchestration loop calling
+`send/queue.py` + `send/gmail.py` against approved ones. The hard rule
+about human approval has nothing to click until the first two pieces of
+that exist.
 
 ## Commands
 
