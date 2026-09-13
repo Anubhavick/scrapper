@@ -14,7 +14,7 @@ PAGES = {
     '<body>Home. Contact info@clinic.example</body></html>',
     "/contact": '<html><body><form><input name="email"></form>'
     "<a href='mailto:appointments@clinic.example'>Email us</a></body></html>",
-    "/about": "<html><body>&copy; 2022 Clinic</body></html>",
+    "/about": "<html><body>Established 2019. &copy; 2022 Clinic</body></html>",
 }
 
 
@@ -61,7 +61,7 @@ def test_crawl_business_aggregates_contacts_and_signals(monkeypatch) -> None:
     emails = {c.email for c in result.contacts}
     assert emails == {"info@clinic.example", "appointments@clinic.example"}
     assert result.signals["no_contact_form"] is False
-    assert result.signals["last_content_year"] == 2022
+    assert result.signals["last_content_year"] == 2019
 
 
 def test_crawl_business_respects_max_pages(monkeypatch) -> None:

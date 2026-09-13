@@ -29,22 +29,30 @@ from html import escape
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Form
+from fastapi import Depends, FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from leadgen.api.auth import require_auth
 from leadgen.api.campaigns import router as campaigns_router
-from leadgen.api.nav import nav_bar
+from leadgen.api.mailboxes import router as mailboxes_router
+from leadgen.api.nav import PAGE_SIZE, nav_bar, pagination_bar
 from leadgen.api.suppressions import router as suppressions_router
 from leadgen.api.targets import router as targets_router
 from leadgen.db.models import Business, Contact, TargetRun, TargetRunBusiness
 from leadgen.db.session import session_scope
 from leadgen.util.domains import normalise_domain
 
-app = FastAPI(title="Lead Review")
+# `dependencies=` at the FastAPI() level, not per-router -- applies to
+# every route on this app, including ones registered later via
+# `include_router` below and the auto-generated /docs, /openapi.json.
+# See api/auth.py for why this is a single shared credential, not
+# per-user accounts.
+app = FastAPI(title="Lead Review", dependencies=[Depends(require_auth)])
 app.include_router(targets_router)
 app.include_router(suppressions_router)
 app.include_router(campaigns_router)
+app.include_router(mailboxes_router)
 
 CRAWL_STATUSES = ["ok", "partial", "unreachable", "no_website"]
 DEFAULT_CSV = "leads-austin-dentists.csv"
@@ -322,7 +330,7 @@ def reject(
 _RUN_STATUS_COLORS = {"completed": "#1a7f37", "failed": "#cf222e", "running": "#9a6700"}
 
 
-def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "") -> str:
+def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "", page: int = 1, total: int = 0) -> str:
     def run_row(run: TargetRun) -> str:
         badge = _badge(run.status, _RUN_STATUS_COLORS.get(run.status, "#57606a"))
         finished = run.finished_at.strftime("%Y-%m-%d %H:%M") if run.finished_at else ""
@@ -350,6 +358,8 @@ def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "") -> st
         if target_name_filter
         else ""
     )
+    extra_params = {"target_name": target_name_filter} if target_name_filter else {}
+    pager = pagination_bar(page, total, "/runs", extra_params, page_size=PAGE_SIZE)
     return f"""<!doctype html>
 <html>
 <head>
@@ -367,7 +377,7 @@ def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "") -> st
 <body>
   {nav_bar("/runs")}
   <h1>{heading}</h1>
-  <div class="meta">{len(runs)} run(s) &middot; each is one target-profile execution, oldest run's rows still queryable even after a re-scan</div>
+  <div class="meta">{total} run(s) &middot; each is one target-profile execution, oldest run's rows still queryable even after a re-scan</div>
   {filter_note}
   <table>
     <thead>
@@ -375,18 +385,24 @@ def _render_runs_page(runs: list[TargetRun], target_name_filter: str = "") -> st
     </thead>
     <tbody>{body_rows}</tbody>
   </table>
+  {pager}
 </body>
 </html>"""
 
 
 @app.get("/runs", response_class=HTMLResponse)
-def list_runs(target_name: str = "") -> HTMLResponse:
+def list_runs(target_name: str = "", page: int = 1) -> HTMLResponse:
+    page = max(1, page)
     with session_scope() as session:
         stmt = select(TargetRun).order_by(TargetRun.started_at.desc())
+        count_stmt = select(func.count()).select_from(TargetRun)
         if target_name:
             stmt = stmt.where(TargetRun.target_name == target_name)
+            count_stmt = count_stmt.where(TargetRun.target_name == target_name)
+        total = session.execute(count_stmt).scalar_one()
+        stmt = stmt.offset((page - 1) * PAGE_SIZE).limit(PAGE_SIZE)
         runs = session.execute(stmt).scalars().all()
-        html = _render_runs_page(list(runs), target_name)
+        html = _render_runs_page(list(runs), target_name, page, total)
     return HTMLResponse(html)
 
 

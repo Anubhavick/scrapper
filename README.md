@@ -144,9 +144,10 @@ real data or a real send:
   problem if a profile opts in via `qualification.stale_content_before_
   year` / `max_page_weight_mb`; without that they still count as
   "matched" whenever truthy, unchanged from before. Separately,
-  `last_content_year` itself is still computed by regexing full page
-  text for the largest year found, which reliably mistakes a "© 2026"
-  footer for real content freshness — flagged, not yet fixed (docs/07).
+  `last_content_year` used to be computed by regexing full page text for
+  the largest year found, which reliably mistook a "© 2026" footer for
+  real content freshness — fixed in [docs/15](docs/15-last-content-year-copyright-fix.md),
+  verified against real re-crawled sites.
 - `businesses.normalized_domain`'s partial unique index doesn't hold for
   a real multi-location chain sharing one domain — handled, not fully
   solved (see [docs/08](docs/08-persistence.md)).
@@ -162,8 +163,10 @@ cd scrapper
 
 cp .env.example .env
 # edit .env: at minimum leave the Postgres/Redis defaults as-is for
-# local dev; fill in Gmail OAuth + TOKEN_ENCRYPTION_KEY later, once the
-# send stage exists
+# local dev, and set WEB_UI_USERNAME/WEB_UI_PASSWORD to a login of your
+# choice (the web UI won't serve any page without both set, docs/17);
+# fill in Gmail OAuth + TOKEN_ENCRYPTION_KEY later, once the send stage
+# exists
 
 uv sync                        # installs deps into .venv
 docker compose up -d           # starts postgres:16 + redis:7

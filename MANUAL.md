@@ -170,7 +170,7 @@ calls `send/queue.py` + `send/gmail.py` against them is now built**
 (§3.5, docs/12) — it's a separate script, not a route in
 `api/campaigns.py`; nothing in that module sends anything itself.
 
-### 3.5 The orchestration loop (docs/12)
+### 3.5 The orchestration loop (docs/12; preflight checks docs/16, docs/19)
 
 `scripts/send_approved_messages.py` (thin CLI) → `db/orchestration.py`
 (`build_send_jobs()`/`preview_approved_messages()`/`run_approved_messages()`,
@@ -199,6 +199,13 @@ the Gmail call — see docs/12 for why, and for the accepted failure mode
 itself then fails). Verified against real Postgres in preview mode
 (zero writes confirmed directly) and `--dry-run` mode (happy path, a
 suppression-block, and a cap-block); never yet run with `--live`.
+**docs/16**: the loop now also runs `send/oauth.py`'s
+`validate_token_health()` once per mailbox before that mailbox's queue
+starts — a dead refresh token blocks every job for that mailbox
+immediately (no sleep, no reservation) instead of failing once per
+remaining message, each after its own 90-600s wait. Verified against
+real Postgres and a real Google rejection (`invalid_grant`) using a
+disposable mailbox with a garbage refresh token.
 
 ### 3.6 Send from the campaigns UI (docs/13)
 
@@ -259,8 +266,9 @@ fully trusting it.
 
 ## 4. Data model
 
-Eleven tables, defined in `src/leadgen/db/models.py`, two Alembic
-migrations so far. Full column list is in the code (it's the more
+Eleven tables, defined in `src/leadgen/db/models.py`, three Alembic
+migrations so far (the third, docs/18, just adds two nullable columns to
+`mailboxes`). Full column list is in the code (it's the more
 authoritative source — this is a summary):
 
 | Table | Purpose | Notable constraint / decision |
@@ -273,7 +281,7 @@ authoritative source — this is a summary):
 | `target_run_businesses` | join: which businesses a run found, with that run's qualified/crawl_status/tags | (docs/09) these three live here, not on `businesses`, because a re-scan of the same business can change them; unique on `(target_run_id, business_id)` |
 | `campaigns` | a target run + an offer + a sender pool | offer is referenced by id (config file), not a foreign key — offers live in YAML, never the DB |
 | `campaign_mailboxes` | join table, campaign ↔ sender pool | |
-| `mailboxes` | a sending Gmail identity | **no daily-counter column, on purpose** — it's derived from `messages.sent_at` at query time, so there's nothing to drift out of sync with a badly-timed reset job |
+| `mailboxes` | a sending Gmail identity | **no daily-counter column, on purpose** — it's derived from `messages.sent_at` at query time, so there's nothing to drift out of sync with a badly-timed reset job. `last_send_error`/`last_send_error_at` (docs/18) are point-in-time state, not a history log or counter — cleared on the next real success |
 | `messages` | one per `(campaign, contact)` | carries **rendered** subject/body (not a template reference) so an approved message can't silently change later; carries `gmail_message_id`/`gmail_thread_id` for future bounce/reply correlation |
 | `suppressions` | permanent email/domain blocklist | `(scope, value)` shape, not two nullable columns; checked before **every** send, no exceptions, ever |
 
@@ -292,7 +300,7 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `config/` | Pydantic schemas + YAML loader for target profiles, business types, offers | Done, tested |
 | `util/domains.py` | `normalise_domain()` | Done, tested |
 | `discover/` | Nominatim geocoding (cached) + Overpass query/run/parse (all 4 location modes) + discovery-time filters | Done; confirmed reachable against real Overpass/Nominatim (docs/03). Places/CSV sources not implemented |
-| `enrich/` | robots.txt-aware rate-limited crawler, email extraction (never guessed), 8 signals, qualification | Done. Known gap: `last_content_year` regexes full page text and gets fooled by copyright footers (docs/07) |
+| `enrich/` | robots.txt-aware rate-limited crawler, email extraction (never guessed), 8 signals, qualification | Done. `last_content_year`'s copyright-footer bug fixed (docs/15) |
 | `pipeline.py` | Wires discover → filter → crawl → qualify → CSV, optionally persisting to Postgres | Done, verified against real Postgres (docs/08) |
 | `db/persist.py` | Upserts for businesses/contacts/signals/target_runs/target_run_businesses | Done, verified against real Postgres |
 | `db/repository.py` | The two Postgres queries behind send caps/suppression (`count_sent_today`, `fetch_suppressions`, `reserve_send_slot`) | Done; **not covered by the automated test suite** (JSONB/UUID aren't SQLite-compatible) — verify manually against real Postgres before relying on it |
@@ -302,12 +310,14 @@ Full reasoning behind every non-obvious schema choice: CLAUDE.md's
 | `send/{crypto,oauth,gmail,caps,suppression,queue}.py` | Refresh-token encryption, Gmail OAuth flow (`gmail.send` only), MIME + actual send call, cap/suppression/delay decision logic | Done, tested; **verified against a real Gmail account** (a real message was sent and received) |
 | `send/orchestrator.py` | `run_orchestration_loop()` -- pure decision logic grouping approved sends by mailbox and driving each through `send_next()` (docs/12) | Done, tested (`tests/test_orchestrator.py`) |
 | `api/review.py` | FastAPI UI: `/` filters a pipeline CSV and rejects bad matches (docs/07, no DB needed); `/runs` + `/runs/{id}` browse past scans from Postgres instead (docs/09), `/runs?target_name=` filters to one target | Done |
-| `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles, `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command | Done, tested (no DB dependency) |
+| `api/targets.py` | Scan-builder UI (docs/10): `/targets` lists profiles (paginated, docs/19), `/targets/new` + `POST /targets` create one (validated via `TargetProfile.model_validate()`, create-only -- never overwrites), `/targets/{name}` shows the raw YAML + run command, `/targets/{name}/edit` (docs/19) edits one in place (same validation, rewrites the whole file -- comments are lost, warned inline) | Done, tested (no DB dependency) |
 | `db/campaigns.py` | `create_campaign()` + `generate_campaign_messages()` -- turns a target_run's qualified leads into a campaign + one rendered message per business | Done, verified against real Postgres |
-| `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns`, `/campaigns/new`, `/campaigns/{id}` -- edit a queued message's text, then Approve or Reject (edit locked once approved). Also `/campaigns/{id}`'s **Send** section (docs/13): a read-only preview, and a confirm-phrase-gated button that enqueues `jobs.send_campaign_messages_job` via RQ (never inline -- see docs/13) | Done |
+| `api/campaigns.py` | Campaigns + message-approval UI (docs/11): `/campaigns` (paginated, docs/19), `/campaigns/new`, `/campaigns/{id}` -- edit a queued message's text, then Approve or Reject (edit locked once approved), or bulk-approve every queued message at once (docs/19, gated on typing back the exact count). Also `/campaigns/{id}`'s **Send** section (docs/13): a read-only preview, and a confirm-phrase-gated button that enqueues `jobs.send_campaign_messages_job` via RQ (never inline -- see docs/13) | Done |
 | `api/suppressions.py` | Manual suppression-list UI (docs/14): `/suppressions` -- list + create-only add form, `value` normalised the same way `send/suppression.py` checks it, duplicate/malformed input rejected with a friendly error | Done; not covered by the automated suite (same reason as the other DB-touching `api/` modules) -- verified manually |
-| `api/nav.py` | Shared top-nav strip across all five pages | Done |
-| `db/orchestration.py` | `build_send_jobs()` + `preview_approved_messages()` (zero-write summary) + `run_approved_messages()` -- reads `approved` messages, drives `send/orchestrator.py` against real Postgres/Gmail (docs/12, docs/13); all three take an optional `campaign_id` filter | Done; **not covered by the automated test suite** (same JSONB/UUID reason as `db/repository.py`/`db/campaigns.py`) -- verified manually |
+| `api/nav.py` | Shared top-nav strip across all six pages, plus a shared `pagination_bar()` (docs/19) used by `/runs`, `/targets`, `/campaigns` | Done |
+| `api/auth.py` | HTTP Basic Auth (docs/17): `require_auth`, one shared `WEB_UI_USERNAME`/`WEB_UI_PASSWORD` credential, wired at the `FastAPI(dependencies=...)` level so it covers every route on the shared app | Done, tested (`tests/test_auth.py`); verified against the real running server |
+| `api/mailboxes.py` | `/mailboxes` health page (docs/18): live token-health check, sent-today vs. daily cap, last real send error -- everything currently knowable about a mailbox's health without new OAuth scopes | Done, tested (`tests/test_mailboxes_api.py`); verified against the real running server |
+| `db/orchestration.py` | `build_send_jobs()` + `preview_approved_messages()` (zero-write summary) + `run_approved_messages()` -- reads `approved` messages, drives `send/orchestrator.py` against real Postgres/Gmail (docs/12, docs/13), running per-mailbox token-health (docs/16) and `is_active` (docs/19) preflights, reassigning a message stuck on an inactive mailbox (docs/19, real-run path only) | Done; **not covered by the automated test suite** (same JSONB/UUID reason as `db/repository.py`/`db/campaigns.py`) -- verified manually |
 | `scripts/send_approved_messages.py` | CLI entry point; no flags = read-only preview (default), `--dry-run` = full loop/fake Gmail/real reservation writes (test data only), `--live` + a typed confirmation phrase = actually send | Done; not yet run with `--live` |
 | `queue.py` | `get_queue()` -- RQ `Queue` bound to `REDIS_URL` (docs/13) | Done |
 | `jobs.py` | `send_campaign_messages_job()` + shared `CONFIRMATION_PHRASE` (docs/13) | Done; verified manually against real Postgres + Redis (`live=False`) |
@@ -428,20 +438,67 @@ Real, verified — not just passing mocked tests:
 - The campaigns UI's Send section: an RQ job enqueued and run to completion (`--burst` worker) against a real, throwaway approved message with `live=False`, including the real 90-600s sleep (not patched out) and a correct `sent`/null-`gmail_message_id` reservation afterward (docs/13). A macOS-only `rq worker` fork-safety crash was hit and worked around (`OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`), not a bug in this codebase. Two more real bugs found and fixed: an overlapping-run double-send gap (`_reserve_fn` now re-checks the message is still `approved` under the lock before reserving it) and `send/orchestrator.py`'s broad exception handler silently swallowing RQ's own `JobTimeoutException` (which would have let a job run forever past its `job_timeout` instead of being killed) — both closed, the second covered by a new pure test.
 - **The first real send.** A real campaign (`dentists-austin-tx-round-1`, 6 real qualified Austin dentist leads from the existing `dentists-austin-tx` run) was built, one message (Austin Cosmetic Dentistry) was reviewed and approved by the user in the actual browser, and sent for real via the campaigns page's Start sending button + an `rq worker` — a real `gmail_message_id` landed in Postgres. Confirms the whole discover → crawl → qualify → compose → approve → send chain works end to end with real data. The other 5 messages in that campaign are untouched (`queued`, never approved).
 - The manual suppression-list UI (docs/14): add/duplicate-rejection/malformed-input all verified against the live server, `value` confirmed to normalise the same way `send/suppression.py` checks it (a full URL for a domain suppression resolves to the same string a real crawled site's domain would). A second instance of docs/09's `Form(...)`-empty-string bug caught and fixed the same way.
+- The orchestration loop's preflight token-health check (docs/16): a
+  disposable mailbox with a deliberately garbage refresh token got a
+  real `invalid_grant` rejection from Google and had every one of its
+  jobs blocked immediately (no sleep, no reservation, message left
+  `approved`), while the one real authorized mailbox's disposable test
+  message went through the full loop normally in the same run — both
+  against real Postgres, all test rows deleted after.
+- HTTP Basic Auth on the whole web UI (docs/17): hit the real running
+  server with `curl` (not just `TestClient`) — no credentials and wrong
+  credentials both `401` with `WWW-Authenticate: Basic` on every page
+  checked (`/targets`, `/campaigns`, `/suppressions`, `/runs`), correct
+  credentials `200` with real page content; `scripts/dev.sh up`'s new
+  preflight check confirmed to refuse starting when the credentials are
+  unset in `.env` instead of coming up silently broken.
+- The `/mailboxes` health page (docs/18): hit the real running server —
+  the one real mailbox showed a genuine live "token ok" (an actual
+  successful Google refresh-grant call made during the request), the
+  correct `1/50` sent-today count, and "none since last success"; a
+  disposable mailbox with a deliberately garbage refresh token showed
+  "token dead" with Google's real `invalid_grant` response and its
+  pre-set `last_send_error` text, both rendered correctly — then
+  deleted, only the one real mailbox left afterward.
+- Five smaller items (docs/19), all against real Postgres/the real
+  running server: `/runs` and `/campaigns` pagination each verified with
+  30 disposable rows (correct page counts, correct per-page contents);
+  bulk-approve verified end to end (wrong phrase rejected with nothing
+  approved, correct phrase approved all 4 queued messages in one
+  request); mailbox reassignment verified with a two-mailbox pool (one
+  active, one inactive) — `build_send_jobs(reassign=True)` reassigned
+  and persisted the change (confirmed from a *separate* session read
+  afterward), `reassign=False` left it completely untouched; the
+  mid-run `is_active` re-check's core mechanism (a fresh column-select
+  seeing another session's concurrent commit within the same open
+  transaction) confirmed directly, not just inferred; target-profile
+  edit-in-place verified live (created a real disposable profile,
+  edited its radius via the real form, confirmed the file on disk
+  actually changed) then cleaned up.
 
 Every step through message approval, the orchestration loop, sending
 from the UI, and manual suppression is done: history/review (docs/09) →
 scan-builder (docs/10) → campaigns + message approval (docs/11) →
 orchestration loop (docs/12) → send-from-the-UI (docs/13) →
-suppression-list UI (docs/14). Not built, in priority order:
+suppression-list UI (docs/14). The `last_content_year` regex bug (docs/07)
+is now fixed (docs/15) — a copyright-footer year no longer gets mistaken
+for fresh content — the orchestration loop's preflight token-health
+check (docs/16) is done, the web UI now requires a login (docs/17), a
+`/mailboxes` health page exists (docs/18, scoped to what's actually
+knowable without new OAuth scopes — no real spam/reputation signal is
+available yet), and five smaller items are done (docs/19): target-profile
+edit-in-place, `/runs`/`/targets`/`/campaigns` pagination, bulk-approve,
+mailbox reassignment for a since-deactivated mailbox, and a mid-run
+`is_active` re-check in the orchestration loop. Not built, in priority
+order:
 
-1. The `last_content_year` regex bug (docs/07) — picks up a copyright
-   footer year as "fresh content."
-2. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
+1. **Step 7**: bounce/reply monitoring — needs a Google CASA review for
    the restricted `gmail.readonly`/`gmail.modify` scopes. Would give
    `suppressions` its automatic writer; docs/14's UI is the manual
-   stopgap until then.
-3. Google Places as a second discover source (designed for in
+   stopgap until then. Deliberately deferred (2026-09-13) — see
+   ROADMAP.md for the reasoning on why a real CASA review is likely
+   avoidable for this internal tool.
+2. Google Places as a second discover source (designed for in
    PROJECT.md, not implemented) — only worth it if Overpass coverage
    proves thin for a real target vertical/city.
 

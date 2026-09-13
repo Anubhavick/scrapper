@@ -26,7 +26,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 
-from leadgen.api.nav import nav_bar
+from leadgen.api.nav import PAGE_SIZE, nav_bar, pagination_bar
 from leadgen.api.targets import load_registries
 from leadgen.db.campaigns import CampaignError, create_campaign, generate_campaign_messages
 from leadgen.db.models import Business, Campaign, CampaignMailbox, Contact, Mailbox, Message, TargetRun, TargetRunBusiness
@@ -97,7 +97,7 @@ def _page(title: str, active: str, body: str, extra_head: str = "") -> str:
 # ---------------------------------------------------------------- index
 
 
-def _render_index(rows: list[tuple]) -> str:
+def _render_index(rows: list[tuple], page: int = 1, total: int = 0) -> str:
     def row_html(campaign: Campaign, target_name: str, counts: dict, mailbox_names: list[str]) -> str:
         total = sum(counts.values())
         badges = " ".join(
@@ -119,21 +119,34 @@ def _render_index(rows: list[tuple]) -> str:
         '<tr><td colspan="5" style="text-align:center;color:#57606a;padding:24px;">'
         "No campaigns yet -- create one below.</td></tr>"
     )
+    pager = pagination_bar(page, total, "/campaigns", page_size=PAGE_SIZE)
     body = f"""
   <h1>Campaigns</h1>
-  <div class="meta">{len(rows)} campaign(s) &middot; <a href="/campaigns/new" class="btn-secondary">+ New campaign</a></div>
+  <div class="meta">{total} campaign(s) &middot; <a href="/campaigns/new" class="btn-secondary">+ New campaign</a></div>
   <table>
     <thead><tr><th>Campaign</th><th>Sender pool</th><th>Messages</th><th>Status breakdown</th><th></th></tr></thead>
     <tbody>{body_rows}</tbody>
   </table>
+  {pager}
     """
     return _page("Campaigns", "/campaigns", body)
 
 
 @router.get("/campaigns", response_class=HTMLResponse)
-def list_campaigns() -> HTMLResponse:
+def list_campaigns(page: int = 1) -> HTMLResponse:
+    page = max(1, page)
     with session_scope() as session:
-        campaigns = session.execute(select(Campaign).order_by(Campaign.created_at.desc())).scalars().all()
+        total = session.execute(select(func.count()).select_from(Campaign)).scalar_one()
+        campaigns = (
+            session.execute(
+                select(Campaign)
+                .order_by(Campaign.created_at.desc())
+                .offset((page - 1) * PAGE_SIZE)
+                .limit(PAGE_SIZE)
+            )
+            .scalars()
+            .all()
+        )
         rows = []
         for campaign in campaigns:
             target_run = session.get(TargetRun, campaign.target_run_id)
@@ -155,7 +168,7 @@ def list_campaigns() -> HTMLResponse:
                 .all()
             )
             rows.append((campaign, target_name, counts, mailbox_names))
-        html = _render_index(rows)
+        html = _render_index(rows, page, total)
     return HTMLResponse(html)
 
 
@@ -432,6 +445,40 @@ def start_send(campaign_id: str, confirm: str = Form("")) -> HTMLResponse:
 # ------------------------------------------------------------------ show
 
 
+def _bulk_approve_phrase(queued_count: int) -> str:
+    return f"approve all {queued_count}"
+
+
+def _render_bulk_approve(campaign_id, approver: str, queued_count: int, bulk_error: str) -> str:
+    """Only shown once there's more than one `queued` message -- this is
+    for a large campaign's worth of tedium, not a replacement for the
+    single-message Approve button. Typing back the exact count (not just
+    clicking a button, and not a generic JS confirm() dialog -- this
+    codebase has none, on purpose, everything server-rendered) is the
+    same "type something back" friction `jobs.py`'s `CONFIRMATION_PHRASE`
+    already uses for a real send, scaled to this smaller-but-still-
+    irreversible action. It does **not** relax PROJECT.md's "no send
+    without a human clicking approve on the exact rendered text" hard
+    rule: every queued message's full subject/body is already rendered
+    directly on this same page (in the editable textarea above, not
+    behind a collapsed <details>), so approving all of them here approves
+    text that was already fully visible, not text nobody looked at."""
+    if queued_count < 2:
+        return ""
+    error_html = f'<div class="errors">{escape(bulk_error)}</div>' if bulk_error else ""
+    phrase = _bulk_approve_phrase(queued_count)
+    return f"""
+  <form method="post" action="/campaigns/{campaign_id}/bulk-approve" style="margin:16px 0;padding:12px 16px;border:1px solid #d0d7de;border-radius:6px;">
+    {error_html}
+    <input type="hidden" name="approver" value="{escape(approver)}">
+    <label style="font-size:13px;">Type <code>{escape(phrase)}</code> to approve all {queued_count} queued messages below at once:
+      <input type="text" name="confirm" placeholder="{escape(phrase)}" style="width:220px;">
+    </label>
+    <button type="submit" class="btn" style="margin-left:8px;">Approve all queued ({queued_count})</button>
+  </form>
+    """
+
+
 def _render_show(
     campaign: Campaign,
     target_name: str,
@@ -442,6 +489,7 @@ def _render_show(
     error: str = "",
     send_section: str = "",
     auto_refresh: bool = False,
+    bulk_error: str = "",
 ) -> str:
     def message_row(message: Message, contact: Contact, business: Business) -> str:
         badge = _badge(message.status, _STATUS_COLORS.get(message.status, "#57606a"))
@@ -488,8 +536,10 @@ def _render_show(
     body_rows = "".join(message_row(*r) for r in rows) or (
         '<tr><td colspan="5" style="text-align:center;color:#57606a;padding:24px;">No messages in this campaign.</td></tr>'
     )
+    queued_count = sum(1 for m, _, _ in rows if m.status == "queued")
     notice_html = f'<div class="notice">{escape(notice)}</div>' if notice else ""
     error_html = f'<div class="errors">{escape(error)}</div>' if error else ""
+    bulk_approve_html = _render_bulk_approve(campaign.id, approver, queued_count, bulk_error)
     body = f"""
   <h1>Campaign -- {escape(campaign.name or str(campaign.id)[:8])}</h1>
   <div class="meta">target: {escape(target_name)} &middot; offer: {escape(campaign.offer_id)} &middot; sender pool: {escape(", ".join(mailbox_names))}</div>
@@ -502,6 +552,7 @@ def _render_show(
     <button type="submit" class="btn-secondary">Set</button>
   </form>
   {send_section}
+  {bulk_approve_html}
   <table>
     <thead><tr><th>Business</th><th>Contact</th><th>Subject / body</th><th>Status</th><th></th></tr></thead>
     <tbody>{body_rows}</tbody>
@@ -519,6 +570,7 @@ def show_campaign(
     skipped: str = "",
     edit_error: str = "",
     send_error: str = "",
+    bulk_error: str = "",
 ) -> HTMLResponse:
     try:
         campaign_uuid = uuid.UUID(campaign_id)
@@ -565,6 +617,7 @@ def show_campaign(
             edit_error,
             send_section=send_section,
             auto_refresh=active_status is not None,
+            bulk_error=bulk_error,
         )
     return HTMLResponse(html)
 
@@ -648,3 +701,47 @@ def reject_message(campaign_id: str, message_id: str, approver: str = Form("")) 
         if message.status == "queued":
             message.status = "rejected"
     return RedirectResponse(url=f"/campaigns/{campaign_id}?approver={quote(approver)}", status_code=303)
+
+
+@router.post("/campaigns/{campaign_id}/bulk-approve")
+def bulk_approve(campaign_id: str, approver: str = Form(""), confirm: str = Form("")) -> HTMLResponse:
+    """Approves every currently-`queued` message in one campaign at once
+    -- see `_render_bulk_approve`'s docstring for why this doesn't relax
+    the "no send without approving the exact rendered text" hard rule.
+    Re-counts `queued` messages at submit time (not trusting whatever
+    count the page happened to show when it was loaded) and requires the
+    typed phrase to match *that* count -- if someone else approved or
+    rejected a message in the meantime, a stale phrase now mismatches and
+    this refuses rather than approving a different set than what the
+    phrase named."""
+    approver = approver.strip()
+    confirm = confirm.strip().lower()
+    try:
+        campaign_uuid = uuid.UUID(campaign_id)
+    except ValueError:
+        return HTMLResponse(f"<p>Not a valid campaign id: {escape(campaign_id)}</p>", status_code=404)
+
+    error = ""
+    if not approver:
+        error = 'Type your name in "Approving as" before bulk-approving.'
+    else:
+        with session_scope() as session:
+            queued = session.execute(
+                select(Message).where(Message.campaign_id == campaign_uuid, Message.status == "queued")
+            ).scalars().all()
+            expected = _bulk_approve_phrase(len(queued))
+            if not queued:
+                error = "No queued messages left to approve."
+            elif confirm != expected:
+                error = f"Type exactly {expected!r} to confirm -- got {confirm!r}."
+            else:
+                now = datetime.now(timezone.utc)
+                for message in queued:
+                    message.status = "approved"
+                    message.approved_by = approver
+                    message.approved_at = now
+
+    params = f"?approver={quote(approver)}"
+    if error:
+        params += f"&bulk_error={quote(error)}"
+    return RedirectResponse(url=f"/campaigns/{campaign_id}{params}", status_code=303)

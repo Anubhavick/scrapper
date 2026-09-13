@@ -18,9 +18,12 @@ suite for the same JSONB/UUID-vs-SQLite reason as `db/repository.py`/
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from leadgen.send.queue import SendBlocked, send_next
+
+if TYPE_CHECKING:
+    from leadgen.send.oauth import TokenHealth
 
 try:
     # Soft dependency: this module has no hard import of rq (it's meant
@@ -72,6 +75,8 @@ def run_orchestration_loop(
     on_sent: Callable[[SendJob, dict], None],
     on_blocked: Callable[[SendJob, SendBlocked], None],
     on_error: Callable[[SendJob, Exception], None] | None = None,
+    token_health_fn: Callable[[object], "TokenHealth"] | None = None,
+    mailbox_active_fn: Callable[[object], bool] | None = None,
 ) -> list[SendResult]:
     """Groups `jobs` by `mailbox_id` (stable order within each group) and
     works through each mailbox's queue in turn via `send_next()` -- which
@@ -110,13 +115,56 @@ def run_orchestration_loop(
     *process itself* is being cancelled -- treating it like an ordinary
     per-message error would let the loop keep going, sleeping and
     sending, indefinitely past whatever `job_timeout` was supposed to
-    enforce. See the module docstring for how this was actually caught."""
+    enforce. See the module docstring for how this was actually caught.
+
+    `token_health_fn(mailbox_id)`, when given, is called once per mailbox
+    *before* that mailbox's first job is attempted -- a preflight, not a
+    per-message check. A dead refresh token (revoked consent, the 7-day
+    Testing-mode expiry, an account security event) is a per-*mailbox*
+    fact, not a per-message one: without this, a dead token used to
+    surface as `send_fn` raising once per remaining message in that
+    mailbox's queue, each one only discovered after `send_next()` had
+    already slept out its own 90-600s gap first. When the check reports
+    unhealthy, every job in that mailbox is reported blocked
+    (`reason="token"`, via `on_blocked`/the returned `SendResult`s) with
+    no sleep, no reservation, and no send attempt for any of them --
+    mirroring how a `"cap"` block already stops the rest of that
+    mailbox's queue, just decided up front instead of after the first
+    job fails. Other mailboxes are unaffected either way.
+
+    `mailbox_active_fn(mailbox_id)`, when given, is checked at the same
+    point as `token_health_fn` -- once per mailbox, before its queue
+    starts. `jobs` is normally built from a single up-front snapshot of
+    which mailboxes were active (docs/12); for a long-running loop over
+    many mailboxes, one could be deactivated (an incident, a mistake
+    caught mid-run) after that snapshot was taken but before this
+    function reaches its turn. Checking again right here -- not just
+    once for the whole run -- catches that without needing a separate
+    poller. An inactive mailbox blocks all its jobs the same way an
+    unhealthy token does (`reason="mailbox_inactive"`)."""
     by_mailbox: dict[object, list[SendJob]] = {}
     for job in jobs:
         by_mailbox.setdefault(job.mailbox_id, []).append(job)
 
     results: list[SendResult] = []
-    for mailbox_jobs in by_mailbox.values():
+    for mailbox_id, mailbox_jobs in by_mailbox.items():
+        if mailbox_active_fn is not None and not mailbox_active_fn(mailbox_id):
+            exc = SendBlocked(f"mailbox {mailbox_id} is no longer active", reason="mailbox_inactive")
+            for job in mailbox_jobs:
+                on_blocked(job, exc)
+                results.append(SendResult(job, "blocked", detail=str(exc)))
+            continue
+        if token_health_fn is not None:
+            health = token_health_fn(mailbox_id)
+            if not health.healthy:
+                exc = SendBlocked(
+                    f"mailbox {mailbox_id} refresh token unhealthy: {health.reason}",
+                    reason="token",
+                )
+                for job in mailbox_jobs:
+                    on_blocked(job, exc)
+                    results.append(SendResult(job, "blocked", detail=str(exc)))
+                continue
         for job in mailbox_jobs:
             try:
                 gmail_response = send_next(

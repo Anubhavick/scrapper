@@ -130,8 +130,22 @@ def _has_whatsapp_link(html_lower: str) -> bool:
     return "wa.me/" in html_lower or "api.whatsapp.com/send" in html_lower
 
 
+_YEAR_RE = r"(?:19\d{2}|20\d{2})"
+
+# A year mentioned right after a copyright marker (`©`, `(c)`, "copyright")
+# is almost always auto-generated to today's year by a template and says
+# nothing about when the page's actual content was last touched -- see
+# docs/07/docs/15. Matches an optional trailing range (`© 2015-2026`) too,
+# since both ends of a copyright range are equally uninformative.
+_COPYRIGHT_YEAR_RE = re.compile(
+    rf"(?:©|\(c\)|copyright)[^0-9]{{0,20}}{_YEAR_RE}(?:\s*[-–—]\s*{_YEAR_RE})?",
+    re.IGNORECASE,
+)
+
+
 def _extract_years(text: str) -> list[int]:
-    return [int(year) for year in re.findall(r"\b(19\d{2}|20\d{2})\b", text)]
+    content_text = _COPYRIGHT_YEAR_RE.sub(" ", text)
+    return [int(year) for year in re.findall(rf"\b({_YEAR_RE})\b", content_text)]
 
 
 def compute_signals(pages: list[PageFetch]) -> dict[str, object]:

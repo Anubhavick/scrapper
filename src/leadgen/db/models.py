@@ -256,7 +256,14 @@ class CampaignMailbox(Base):
 class Mailbox(Base):
     """A sending identity. Daily send counts are derived from
     messages.sent_at at query time — not stored here — so there is no
-    counter that can drift out of sync with what was actually sent."""
+    counter that can drift out of sync with what was actually sent.
+
+    `last_send_error`/`last_send_error_at` are point-in-time state, not a
+    history log or a counter needing a reset job (the thing the note
+    above warns against) — each real send attempt through
+    `db/orchestration.py` overwrites them: cleared on success, set on
+    failure. Enough to answer "is this mailbox currently healthy beyond
+    just token validity" (ROADMAP.md item 6/docs/18) without a new table."""
 
     __tablename__ = "mailboxes"
 
@@ -267,6 +274,9 @@ class Mailbox(Base):
     oauth_refresh_token_encrypted: Mapped[str]
     daily_cap: Mapped[int] = mapped_column(Integer, default=50)
     is_active: Mapped[bool] = mapped_column(default=True)
+
+    last_send_error: Mapped[str | None]
+    last_send_error_at: Mapped[datetime | None]
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -48,7 +48,21 @@ _wait_for_docker_health() {
   done
 }
 
+_check_web_ui_credentials() {
+  # curl's readiness check below doesn't fail on a non-2xx response, so
+  # without this a missing WEB_UI_USERNAME/WEB_UI_PASSWORD would print
+  # "Ready" while every real page 500s (api/auth.py raises rather than
+  # serving anything unconfigured, see docs/17) -- fail clearly, up front,
+  # instead of that confusing state.
+  if [ ! -f .env ] || ! grep -qE '^WEB_UI_USERNAME=.+' .env || ! grep -qE '^WEB_UI_PASSWORD=.+' .env; then
+    echo "WEB_UI_USERNAME and WEB_UI_PASSWORD must both be set in .env before starting the web UI (see .env.example, docs/17)." >&2
+    exit 1
+  fi
+}
+
 cmd_up() {
+  _check_web_ui_credentials
+
   echo "Starting Postgres + Redis..."
   docker compose up -d
   _wait_for_docker_health
@@ -86,7 +100,7 @@ cmd_up() {
   done
 
   echo
-  echo "Ready: $UI_URL"
+  echo "Ready: $UI_URL (browser will prompt for the WEB_UI_USERNAME/WEB_UI_PASSWORD in your .env)"
   if command -v open >/dev/null 2>&1; then
     open "$UI_URL"
   fi

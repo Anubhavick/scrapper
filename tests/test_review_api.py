@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,11 @@ from leadgen.api.review import _business_row_dict, add_excluded_domain, app
 from leadgen.db.models import Business, TargetRunBusiness
 
 CSV_HEADER = "name,website_url,phone,address,emails,qualified,crawl_status,tags,signals\n"
+
+
+def _basic_auth_header(username: str, password: str) -> str:
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return f"Basic {token}"
 
 
 def _write_csv(path: Path) -> None:
@@ -28,8 +34,10 @@ def _write_profile(path: Path) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("WEB_UI_USERNAME", "test-user")
+    monkeypatch.setenv("WEB_UI_PASSWORD", "test-pass")
+    return TestClient(app, headers={"Authorization": _basic_auth_header("test-user", "test-pass")})
 
 
 def test_index_renders_rows(tmp_path: Path, client: TestClient) -> None:

@@ -116,12 +116,52 @@ def test_signals_platform_none_when_undetected() -> None:
 
 def test_signals_last_content_year_takes_max_across_pages() -> None:
     homepage = _page("https://clinic.example/", "<html><body>Est. 2015</body></html>")
+    other_page = _page(
+        "https://clinic.example/about",
+        "<html><body>Voted best clinic in 2019.</body></html>",
+    )
+    signals = compute_signals([homepage, other_page])
+    assert signals["last_content_year"] == 2019
+
+
+def test_signals_last_content_year_ignores_copyright_footer_year() -> None:
+    # A stale site whose only year anywhere is an auto-generated copyright
+    # footer must not be reported as "fresh" just because the footer year
+    # is current -- docs/07's original bug report.
+    homepage = _page(
+        "https://clinic.example/",
+        "<html><body>Welcome to our clinic. &copy; 2026 Clinic. All rights reserved.</body></html>",
+    )
+    signals = compute_signals([homepage])
+    assert signals["last_content_year"] is None
+
+
+def test_signals_last_content_year_prefers_real_content_over_copyright_footer() -> None:
+    homepage = _page(
+        "https://clinic.example/",
+        "<html><body>Latest news from 2019.</body></html>",
+    )
     footer_page = _page(
         "https://clinic.example/about",
-        "<html><body>&copy; 2023 Clinic. All rights reserved.</body></html>",
+        "<html><body>&copy; 2026 Clinic. All rights reserved.</body></html>",
     )
     signals = compute_signals([homepage, footer_page])
-    assert signals["last_content_year"] == 2023
+    assert signals["last_content_year"] == 2019
+
+
+def test_signals_last_content_year_ignores_copyright_year_range() -> None:
+    homepage = _page(
+        "https://clinic.example/",
+        "<html><body>(c) 2015-2026 Clinic. All rights reserved.</body></html>",
+    )
+    signals = compute_signals([homepage])
+    assert signals["last_content_year"] is None
+
+
+def test_signals_last_content_year_none_when_no_year_mentioned() -> None:
+    homepage = _page("https://clinic.example/", "<html><body>Welcome!</body></html>")
+    signals = compute_signals([homepage])
+    assert signals["last_content_year"] is None
 
 
 def test_signals_page_weight_sums_bytes() -> None:

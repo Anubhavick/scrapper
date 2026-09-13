@@ -29,7 +29,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
 
-from leadgen.api.nav import nav_bar
+from leadgen.api.nav import PAGE_SIZE, nav_bar, pagination_bar
 from leadgen.config.loader import ConfigError, load_business_types, load_offers, load_target_profile
 from leadgen.config.models import KNOWN_SIGNALS, TargetProfile
 
@@ -239,6 +239,35 @@ def _build_profile_dict(values: dict) -> dict:
     }
 
 
+def _validate_profile(values: dict, business_types: dict, offers: dict) -> tuple[TargetProfile | None, list[str]]:
+    """Shared by create and edit -- the only difference between them is
+    what happens to the filesystem afterward (a new file vs. an
+    overwrite), never how a submission is validated."""
+    errors: list[str] = []
+    profile: TargetProfile | None = None
+    try:
+        profile = TargetProfile.model_validate(_build_profile_dict(values))
+    except ValidationError as exc:
+        errors.extend(_format_pydantic_errors(exc))
+
+    if profile is not None:
+        if profile.business_type not in business_types:
+            errors.append(
+                f"Unknown business_type {profile.business_type!r}; known: {sorted(business_types)}"
+            )
+        if profile.outreach.offer_id not in offers:
+            errors.append(
+                f"Unknown offer_id {profile.outreach.offer_id!r}; known: {sorted(offers)}"
+            )
+    return profile, errors
+
+
+def _write_profile(path: Path, profile: TargetProfile) -> None:
+    data = _to_yaml_safe(profile.model_dump(exclude_none=True))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+
+
 def _location_summary(location) -> str:
     mode = location.mode
     if mode == "radius":
@@ -286,7 +315,9 @@ def _page(title: str, active: str, body: str) -> str:
 </html>"""
 
 
-def _render_index(rows: list[tuple[str, TargetProfile | None, str | None]], notice: str) -> str:
+def _render_index(
+    rows: list[tuple[str, TargetProfile | None, str | None]], notice: str, page: int = 1, total: int = 0
+) -> str:
     def row_html(name: str, profile: TargetProfile | None, error: str | None) -> str:
         if error:
             return f"""
@@ -309,6 +340,7 @@ def _render_index(rows: list[tuple[str, TargetProfile | None, str | None]], noti
           <td>{badge}</td>
           <td>
             <a href="/targets/{escape(name)}" class="btn-secondary">View</a>
+            <a href="/targets/{escape(name)}/edit" class="btn-secondary">Edit</a>
             <a href="/targets/new?from={escape(name)}" class="btn-secondary">Duplicate</a>
             <a href="/runs?target_name={escape(name)}" class="btn-secondary">History</a>
           </td>
@@ -320,14 +352,16 @@ def _render_index(rows: list[tuple[str, TargetProfile | None, str | None]], noti
         "No target profiles yet -- create one below.</td></tr>"
     )
     notice_html = f'<div class="notice">{escape(notice)}</div>' if notice else ""
+    pager = pagination_bar(page, total, "/targets", page_size=PAGE_SIZE)
     body = f"""
   <h1>Target profiles</h1>
-  <div class="meta">{len(rows)} profile(s) in targets/ &middot; <a href="/targets/new" class="btn-secondary">+ New target</a></div>
+  <div class="meta">{total} profile(s) in targets/ &middot; <a href="/targets/new" class="btn-secondary">+ New target</a></div>
   {notice_html}
   <table>
     <thead><tr><th>Name</th><th>Business type</th><th>Location</th><th>Status</th><th></th></tr></thead>
     <tbody>{body_rows}</tbody>
   </table>
+  {pager}
     """
     return _page("Target profiles", "/targets", body)
 
@@ -370,11 +404,40 @@ def _field_checkbox_group(name: str, label: str, options: list[str], selected: l
     """
 
 
-def _render_form(values: dict, errors: list[str], business_types: list[str], offers: list[str]) -> str:
+def _render_form(
+    values: dict, errors: list[str], business_types: list[str], offers: list[str], edit_name: str | None = None
+) -> str:
     errors_html = ""
     if errors:
         items = "".join(f"<li>{escape(e)}</li>" for e in errors)
         errors_html = f'<div class="errors"><strong>Fix the following:</strong><ul>{items}</ul></div>'
+
+    is_edit = edit_name is not None
+    if is_edit:
+        name_field = f"""
+        <label>Name</label>
+        <input type="text" value="{escape(edit_name)}" disabled>
+        <div class="help">Renaming isn't supported here -- create a new profile (Duplicate) if you need a different name.</div>
+        """
+        edit_warning = (
+            '<div class="errors" style="background:#fff8c5;border-color:#d4a72c55;color:#7d4e00;">'
+            "<strong>Saving rewrites this file from the fields below.</strong> Any hand-written YAML "
+            "comments in it (e.g. a note next to <code>exclude_domains</code>, see docs/07) will be lost. "
+            f"To keep them, edit <code>targets/{escape(edit_name)}.yaml</code> directly instead."
+            "</div>"
+        )
+        form_action = f"/targets/{escape(edit_name)}/edit"
+        submit_label = "Save changes"
+        title = f"Edit target profile -- {edit_name}"
+    else:
+        name_field = _field_text(
+            "name", "Name (becomes targets/<name>.yaml)", values["name"],
+            "lowercase letters, digits, hyphens only, e.g. dentists-austin-tx",
+        )
+        edit_warning = ""
+        form_action = "/targets"
+        submit_label = "Create target profile"
+        title = "New target profile"
 
     business_type_field = (
         _field_select("business_type", "Business type", business_types, values["business_type"])
@@ -398,13 +461,14 @@ def _render_form(values: dict, errors: list[str], business_types: list[str], off
     )
 
     body = f"""
-  <h1>New target profile</h1>
+  <h1>{escape(title)}</h1>
   <div class="meta">Fills in a <code>targets/&lt;name&gt;.yaml</code> file the same pipeline reads today -- see <a href="/targets">existing profiles</a> to duplicate one instead of starting blank.</div>
+  {edit_warning}
   {errors_html}
-  <form method="post" action="/targets">
+  <form method="post" action="{form_action}">
     <fieldset>
       <legend>Identity</legend>
-      {_field_text("name", "Name (becomes targets/<name>.yaml)", values["name"], "lowercase letters, digits, hyphens only, e.g. dentists-austin-tx")}
+      {name_field}
       {_field_checkbox("enabled", "Enabled", values["enabled"])}
       {business_type_field}
     </fieldset>
@@ -456,17 +520,21 @@ def _render_form(values: dict, errors: list[str], business_types: list[str], off
       {_field_text("daily_cap_per_mailbox", "Daily cap per mailbox", values["daily_cap_per_mailbox"], input_type="number")}
     </fieldset>
 
-    <button type="submit" class="btn">Create target profile</button>
+    <button type="submit" class="btn">{escape(submit_label)}</button>
     <a href="/targets" class="btn-secondary" style="margin-left:8px;">Cancel</a>
   </form>
     """
-    return _page("New target profile", "/targets", body)
+    return _page(title, "/targets", body)
 
 
-def _render_show(name: str, raw_text: str, profile: TargetProfile | None, error: str | None, created: bool) -> str:
-    notice_html = (
-        f'<div class="notice">Created targets/{escape(name)}.yaml.</div>' if created else ""
-    )
+def _render_show(
+    name: str, raw_text: str, profile: TargetProfile | None, error: str | None, created: bool, updated: bool = False
+) -> str:
+    notice_html = ""
+    if created:
+        notice_html = f'<div class="notice">Created targets/{escape(name)}.yaml.</div>'
+    elif updated:
+        notice_html = f'<div class="notice">Saved changes to targets/{escape(name)}.yaml.</div>'
     error_html = (
         f'<div class="errors"><strong>This profile does not currently load:</strong> {escape(error)}</div>'
         if error
@@ -476,6 +544,7 @@ def _render_show(name: str, raw_text: str, profile: TargetProfile | None, error:
     body = f"""
   <h1>Target -- {escape(name)}</h1>
   <div class="meta">
+    <a href="/targets/{escape(name)}/edit" class="btn-secondary">Edit</a>
     <a href="/targets/new?from={escape(name)}" class="btn-secondary">Duplicate as new</a>
     <a href="/runs?target_name={escape(name)}" class="btn-secondary">View run history</a>
   </div>
@@ -494,12 +563,15 @@ def _render_show(name: str, raw_text: str, profile: TargetProfile | None, error:
 
 
 @router.get("/targets", response_class=HTMLResponse)
-def list_targets(created: str = "") -> HTMLResponse:
+def list_targets(created: str = "", page: int = 1) -> HTMLResponse:
+    page = max(1, page)
     files = sorted(TARGETS_DIR.glob("*.yaml")) if TARGETS_DIR.is_dir() else []
+    total = len(files)
+    page_files = files[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
     business_types, offers, _load_errors = load_registries()
 
     rows: list[tuple[str, TargetProfile | None, str | None]] = []
-    for path in files:
+    for path in page_files:
         name = path.stem
         try:
             profile = load_target_profile(path, business_types, offers)
@@ -508,7 +580,7 @@ def list_targets(created: str = "") -> HTMLResponse:
             rows.append((name, None, str(exc)))
 
     notice = f"Created {escape(created)}.yaml." if created else ""
-    return HTMLResponse(_render_index(rows, notice))
+    return HTMLResponse(_render_index(rows, notice, page, total))
 
 
 @router.get("/targets/new", response_class=HTMLResponse)
@@ -544,21 +616,8 @@ async def create_target(request: Request) -> HTMLResponse:
     business_types, offers, load_errors = load_registries()
     errors.extend(load_errors)
 
-    profile: TargetProfile | None = None
-    try:
-        profile = TargetProfile.model_validate(_build_profile_dict(values))
-    except ValidationError as exc:
-        errors.extend(_format_pydantic_errors(exc))
-
-    if profile is not None:
-        if profile.business_type not in business_types:
-            errors.append(
-                f"Unknown business_type {profile.business_type!r}; known: {sorted(business_types)}"
-            )
-        if profile.outreach.offer_id not in offers:
-            errors.append(
-                f"Unknown offer_id {profile.outreach.offer_id!r}; known: {sorted(offers)}"
-            )
+    profile, validation_errors = _validate_profile(values, business_types, offers)
+    errors.extend(validation_errors)
 
     target_path = TARGETS_DIR / f"{values['name']}.yaml" if _NAME_RE.match(values["name"]) else None
     if target_path is not None and target_path.exists():
@@ -570,15 +629,13 @@ async def create_target(request: Request) -> HTMLResponse:
     if errors or profile is None or target_path is None:
         return HTMLResponse(_render_form(values, errors, sorted(business_types), sorted(offers)))
 
-    data = _to_yaml_safe(profile.model_dump(exclude_none=True))
-    TARGETS_DIR.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+    _write_profile(target_path, profile)
 
     return RedirectResponse(url=f"/targets/{values['name']}?created=1", status_code=303)
 
 
 @router.get("/targets/{name}", response_class=HTMLResponse)
-def show_target(name: str, created: str = "") -> HTMLResponse:
+def show_target(name: str, created: str = "", updated: str = "") -> HTMLResponse:
     if not _NAME_RE.match(name):
         return HTMLResponse(f"<p>Not a valid target name: {escape(name)}</p>", status_code=404)
 
@@ -596,4 +653,53 @@ def show_target(name: str, created: str = "") -> HTMLResponse:
     except ConfigError as exc:
         error = str(exc)
 
-    return HTMLResponse(_render_show(name, raw_text, profile, error, created == "1"))
+    return HTMLResponse(_render_show(name, raw_text, profile, error, created == "1", updated == "1"))
+
+
+@router.get("/targets/{name}/edit", response_class=HTMLResponse)
+def edit_target_form(name: str) -> HTMLResponse:
+    if not _NAME_RE.match(name):
+        return HTMLResponse(f"<p>Not a valid target name: {escape(name)}</p>", status_code=404)
+
+    path = TARGETS_DIR / f"{name}.yaml"
+    if not path.is_file():
+        return HTMLResponse(f"<p>No target profile named {escape(name)}</p>", status_code=404)
+
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        return HTMLResponse(
+            f"<p>targets/{escape(name)}.yaml doesn't parse as YAML ({escape(str(exc))}) -- "
+            "fix it by hand before editing it here.</p>",
+            status_code=400,
+        )
+
+    values = _values_from_raw(raw)
+    values["name"] = name
+    business_types, offers, load_errors = load_registries()
+    return HTMLResponse(_render_form(values, load_errors, sorted(business_types), sorted(offers), edit_name=name))
+
+
+@router.post("/targets/{name}/edit", response_class=HTMLResponse)
+async def edit_target(name: str, request: Request) -> HTMLResponse:
+    if not _NAME_RE.match(name):
+        return HTMLResponse(f"<p>Not a valid target name: {escape(name)}</p>", status_code=404)
+
+    path = TARGETS_DIR / f"{name}.yaml"
+    if not path.is_file():
+        return HTMLResponse(f"<p>No target profile named {escape(name)}</p>", status_code=404)
+
+    form = await request.form()
+    values = _values_from_form(form)
+    values["name"] = name  # renaming isn't supported via this form -- see _render_form's edit_warning
+
+    business_types, offers, errors = load_registries()
+    profile, validation_errors = _validate_profile(values, business_types, offers)
+    errors.extend(validation_errors)
+
+    if errors or profile is None:
+        return HTMLResponse(_render_form(values, errors, sorted(business_types), sorted(offers), edit_name=name))
+
+    _write_profile(path, profile)
+
+    return RedirectResponse(url=f"/targets/{name}?updated=1", status_code=303)

@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,16 @@ from leadgen.api.review import app
 import leadgen.api.targets as targets_mod
 
 
+def _basic_auth_header(username: str, password: str) -> str:
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return f"Basic {token}"
+
+
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("WEB_UI_USERNAME", "test-user")
+    monkeypatch.setenv("WEB_UI_PASSWORD", "test-pass")
+    return TestClient(app, headers={"Authorization": _basic_auth_header("test-user", "test-pass")})
 
 
 @pytest.fixture(autouse=True)
@@ -189,3 +197,132 @@ def test_show_target_404_for_missing(client: TestClient) -> None:
 def test_show_target_404_for_path_traversal_attempt(client: TestClient) -> None:
     resp = client.get("/targets/..%2F..%2Fetc%2Fpasswd")
     assert resp.status_code == 404
+
+
+def test_edit_target_form_prefills_from_existing_file(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+
+    resp = client.get("/targets/dentists-austin-tx/edit")
+
+    assert resp.status_code == 200
+    assert "touchto.io" in resp.text
+    assert "Renaming isn't supported" in resp.text
+    assert 'action="/targets/dentists-austin-tx/edit"' in resp.text
+
+
+def test_edit_target_form_404_for_missing(client: TestClient) -> None:
+    resp = client.get("/targets/does-not-exist/edit")
+    assert resp.status_code == 404
+
+
+def test_edit_target_saves_changes_and_redirects(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+    form = dict(VALID_FORM, name="dentists-austin-tx", business_type="dentist", radius_km="25")
+
+    resp = client.post("/targets/dentists-austin-tx/edit", data=form, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/targets/dentists-austin-tx?updated=1"
+    data = yaml.safe_load((targets_mod.TARGETS_DIR / "dentists-austin-tx.yaml").read_text())
+    assert data["location"]["radius_km"] == 25.0
+
+
+def test_edit_target_cannot_rename_via_submitted_name_field(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+    form = dict(VALID_FORM, name="totally-different-name", business_type="dentist")
+
+    resp = client.post("/targets/dentists-austin-tx/edit", data=form, follow_redirects=False)
+
+    assert resp.status_code == 303
+    # still saved under the URL's name, not the form's submitted name
+    assert resp.headers["location"] == "/targets/dentists-austin-tx?updated=1"
+    assert not (targets_mod.TARGETS_DIR / "totally-different-name.yaml").exists()
+    data = yaml.safe_load((targets_mod.TARGETS_DIR / "dentists-austin-tx.yaml").read_text())
+    assert data["name"] == "dentists-austin-tx"
+
+
+def test_edit_target_does_not_check_for_duplicate_name(client: TestClient) -> None:
+    # Overwriting the same file it's editing must not trip the
+    # create-only "already exists" rejection.
+    _write_target("dentists-austin-tx")
+    form = dict(VALID_FORM, name="dentists-austin-tx", business_type="dentist")
+
+    resp = client.post("/targets/dentists-austin-tx/edit", data=form, follow_redirects=False)
+
+    assert resp.status_code == 303
+
+
+def test_edit_target_rejects_invalid_submission_without_writing(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+    original = (targets_mod.TARGETS_DIR / "dentists-austin-tx.yaml").read_text()
+    form = dict(VALID_FORM, name="dentists-austin-tx", business_type="dentist", radius_km="0")
+
+    resp = client.post("/targets/dentists-austin-tx/edit", data=form)
+
+    assert resp.status_code == 200
+    assert "greater than 0" in resp.text
+    assert (targets_mod.TARGETS_DIR / "dentists-austin-tx.yaml").read_text() == original
+
+
+def test_edit_target_404_for_missing_on_post(client: TestClient) -> None:
+    resp = client.post("/targets/does-not-exist/edit", data=VALID_FORM)
+    assert resp.status_code == 404
+
+
+def test_edit_target_form_shows_error_for_unparseable_yaml(client: TestClient) -> None:
+    bad_path = targets_mod.TARGETS_DIR / "broken-yaml.yaml"
+    bad_path.write_text("name: [unterminated\n")
+
+    resp = client.get("/targets/broken-yaml/edit")
+
+    assert resp.status_code == 400
+    assert "doesn't parse as YAML" in resp.text
+
+
+def test_show_target_displays_updated_notice(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+
+    resp = client.get("/targets/dentists-austin-tx", params={"updated": "1"})
+
+    assert resp.status_code == 200
+    assert "Saved changes" in resp.text
+
+
+def test_list_targets_shows_edit_link(client: TestClient) -> None:
+    _write_target("dentists-austin-tx")
+
+    resp = client.get("/targets")
+
+    assert "/targets/dentists-austin-tx/edit" in resp.text
+
+
+def test_list_targets_no_pager_when_under_one_page(client: TestClient) -> None:
+    for i in range(3):
+        _write_target(f"target-{i}")
+
+    resp = client.get("/targets")
+
+    assert resp.status_code == 200
+    assert "Page 1 of" not in resp.text
+
+
+def test_list_targets_paginates_when_over_page_size(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import leadgen.api.nav as nav_mod
+
+    monkeypatch.setattr(nav_mod, "PAGE_SIZE", 2)
+    monkeypatch.setattr(targets_mod, "PAGE_SIZE", 2)
+    for i in range(5):
+        _write_target(f"target-{i}")
+
+    resp_page1 = client.get("/targets")
+    assert "Page 1 of 3" in resp_page1.text
+    assert "5 profile(s)" in resp_page1.text
+    # only the first 2 (alphabetically) should be listed on page 1
+    assert "target-0" in resp_page1.text
+    assert "target-1" in resp_page1.text
+    assert "target-2" not in resp_page1.text
+
+    resp_page2 = client.get("/targets", params={"page": 2})
+    assert "target-2" in resp_page2.text
+    assert "target-3" in resp_page2.text
+    assert "target-0" not in resp_page2.text

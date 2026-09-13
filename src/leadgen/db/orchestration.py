@@ -38,11 +38,11 @@ import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from leadgen.db.models import Contact, Mailbox, Message
+from leadgen.db.models import CampaignMailbox, Contact, Mailbox, Message
 from leadgen.db.repository import count_sent_today, fetch_suppressions
 from leadgen.send.crypto import TokenCipher
 from leadgen.send.gmail import build_raw_message, send_message
-from leadgen.send.oauth import refresh_access_token
+from leadgen.send.oauth import refresh_access_token, validate_token_health
 from leadgen.send.orchestrator import SendJob, SendResult, run_orchestration_loop
 
 logger = logging.getLogger(__name__)
@@ -50,13 +50,61 @@ logger = logging.getLogger(__name__)
 __all__ = ["build_send_jobs", "preview_approved_messages", "run_approved_messages"]
 
 
-def build_send_jobs(session: Session, *, campaign_id=None) -> list[SendJob]:
-    """One SendJob per `messages` row with status='approved' whose
-    mailbox is active, ordered so each mailbox's own queue is processed
-    oldest-approved-first. A message whose mailbox was deactivated after
-    approval (docs/11 flags this as a known gap -- mailbox_id is assigned
-    at message-generation time, not send time) is skipped rather than
-    sent from a mailbox nobody vouched for as currently active.
+def _reassign_if_mailbox_inactive(session: Session, message: Message, now: datetime) -> Mailbox | None:
+    """docs/19 (ROADMAP.md's "mailbox_id assigned at generation time, not
+    send time" backlog item): a message's `mailbox_id` is set once,
+    at campaign-generation time (docs/11) -- if that mailbox gets
+    deactivated before send, this used to mean the message was silently
+    skipped forever, invisible to both `preview_approved_messages()` and
+    `run_approved_messages()`, with no path back to `approved` besides
+    manual DB surgery. Now: if the assigned mailbox is inactive, look for
+    another active mailbox in the *same campaign's* sender pool (never a
+    mailbox outside it -- that pool is what a human picked when the
+    campaign was created) and reassign to whichever candidate has sent
+    the fewest messages today (spreads load, doesn't just always pick the
+    first one alphabetically). The reassignment is persisted immediately
+    (`message.mailbox_id` really changes, committed here) since it's a
+    correction to a stale fact, not a reservation -- no advisory lock
+    needed, unlike `_reserve_fn`'s cap-slot decision below. Returns the
+    resolved active `Mailbox`, or `None` if the whole pool is currently
+    inactive (message stays exactly as skipped as it was before this)."""
+    mailbox = session.get(Mailbox, message.mailbox_id)
+    if mailbox is not None and mailbox.is_active:
+        return mailbox
+
+    candidates = session.execute(
+        select(Mailbox)
+        .join(CampaignMailbox, CampaignMailbox.mailbox_id == Mailbox.id)
+        .where(CampaignMailbox.campaign_id == message.campaign_id, Mailbox.is_active.is_(True))
+    ).scalars().all()
+    if not candidates:
+        return None
+
+    best = min(candidates, key=lambda m: count_sent_today(session, m.id, now))
+    logger.warning(
+        "message %s's mailbox %s is inactive; reassigning to %s",
+        message.id, message.mailbox_id, best.id,
+    )
+    message.mailbox_id = best.id
+    session.commit()
+    return best
+
+
+def build_send_jobs(session: Session, *, campaign_id=None, reassign: bool = False) -> list[SendJob]:
+    """One SendJob per `messages` row with status='approved', ordered
+    oldest-approved-first (grouping by mailbox happens downstream in
+    `send/orchestrator.py`, which preserves this relative order within
+    each mailbox's queue).
+
+    `reassign`, when `True`, resolves a message whose assigned mailbox
+    has gone inactive to another active mailbox in the same campaign's
+    pool (see `_reassign_if_mailbox_inactive`) -- writes to the DB as a
+    side effect. Defaults to `False` so `preview_approved_messages()`'s
+    "genuinely read-only, zero writes" guarantee (docs/12) holds
+    regardless of this feature; only `run_approved_messages()` (the real
+    run path) opts in. With `reassign=False`, a message assigned to an
+    inactive mailbox is simply excluded, the original (pre-docs/19)
+    behavior.
 
     `campaign_id`, when given, narrows this to one campaign's approved
     messages -- used by `api/campaigns.py`'s per-campaign "Send" section
@@ -65,25 +113,31 @@ def build_send_jobs(session: Session, *, campaign_id=None) -> list[SendJob]:
     feeds into `preview_approved_messages()`/`run_approved_messages()`
     is still the mailbox's *global* `count_sent_today` either way -- the
     cap is a property of the mailbox, not of any one campaign."""
-    conditions = [Message.status == "approved", Mailbox.is_active.is_(True)]
+    conditions = [Message.status == "approved"]
     if campaign_id is not None:
         conditions.append(Message.campaign_id == campaign_id)
     rows = session.execute(
-        select(Message, Mailbox, Contact)
-        .join(Mailbox, Message.mailbox_id == Mailbox.id)
+        select(Message, Contact)
         .join(Contact, Message.contact_id == Contact.id)
         .where(*conditions)
-        .order_by(Mailbox.id, Message.created_at)
+        .order_by(Message.created_at)
     ).all()
-    return [
-        SendJob(
-            message_id=message.id,
-            mailbox_id=mailbox.id,
-            email=contact.email,
-            daily_cap=mailbox.daily_cap,
+
+    now = datetime.now(timezone.utc)
+    jobs = []
+    for message, contact in rows:
+        if reassign:
+            mailbox = _reassign_if_mailbox_inactive(session, message, now)
+        else:
+            mailbox = session.get(Mailbox, message.mailbox_id)
+            if mailbox is not None and not mailbox.is_active:
+                mailbox = None
+        if mailbox is None:
+            continue
+        jobs.append(
+            SendJob(message_id=message.id, mailbox_id=mailbox.id, email=contact.email, daily_cap=mailbox.daily_cap)
         )
-        for message, mailbox, contact in rows
-    ]
+    return jobs
 
 
 def preview_approved_messages(session: Session, *, campaign_id=None) -> list[dict]:
@@ -197,8 +251,31 @@ def run_approved_messages(
     messages -- see `build_send_jobs`'s docstring. `jobs.py`'s
     `send_campaign_messages_job()` (docs/13) always passes this; only
     the CLI script leaves it unset to act on every approved message.
+
+    Runs `send/oauth.py`'s `validate_token_health()` once per mailbox
+    before that mailbox's queue starts (docs/16, ROADMAP.md item 4) --
+    a dead refresh token blocks every job for that mailbox up front
+    (`reason="token"`) instead of surfacing as the same per-message
+    error repeated once per remaining job, each only discovered after
+    its own 90-600s sleep. Runs in `dry_run` mode too: this makes a real
+    call to Google's token endpoint regardless, the same as the
+    per-mailbox access-token refresh below -- `dry_run` only fakes the
+    Gmail *send* itself.
+
+    Also records real-send outcomes on the mailbox itself (docs/18,
+    ROADMAP.md item 6): a real failure sets `Mailbox.last_send_error`/
+    `last_send_error_at`; a subsequent real success clears both. Not run
+    for `dry_run` -- the faked Gmail call there can't fail, and any
+    reserve-level error in that mode isn't a signal about the mailbox's
+    real-world health. `api/mailboxes.py`'s health page reads these
+    alongside a live `validate_token_health()` call and the daily cap.
+
+    Also reassigns a message stuck on a since-deactivated mailbox to
+    another active mailbox in the same campaign's pool (docs/19,
+    ROADMAP.md's mailbox-reassignment backlog item) -- `build_send_jobs(reassign=True)`, the real-run
+    opt-in that `preview_approved_messages()` deliberately doesn't take.
     """
-    jobs = build_send_jobs(session, campaign_id=campaign_id)
+    jobs = build_send_jobs(session, campaign_id=campaign_id, reassign=True)
     if not jobs:
         return []
 
@@ -235,6 +312,33 @@ def run_approved_messages(
             access_tokens[mailbox_id] = tokens["access_token"]
         return access_tokens[mailbox_id]
 
+    # One token-health check per mailbox, cached for the same reason as
+    # access_tokens above -- validate_token_health() makes a real refresh
+    # call to Google, and this loop's own gaps are long enough that
+    # asking once per mailbox up front is enough to catch a dead token
+    # before any of that mailbox's messages sleep through their own
+    # 90-600s gap only to fail identically at the end of it.
+    token_health_cache: dict = {}
+
+    def token_health_fn(mailbox_id):
+        if mailbox_id not in token_health_cache:
+            token_health_cache[mailbox_id] = validate_token_health(
+                client,
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_tokens[mailbox_id],
+            )
+        return token_health_cache[mailbox_id]
+
+    def mailbox_active_fn(mailbox_id) -> bool:
+        # A plain column select, not session.get(Mailbox, ...) -- the
+        # latter would return the same identity-mapped object already
+        # loaded into `mailboxes` above, whose is_active could be stale
+        # by the time this mailbox's turn in the loop actually comes up
+        # (docs/19, ROADMAP.md's mid-run is_active re-check backlog item).
+        # This always issues a fresh SELECT.
+        return bool(session.execute(select(Mailbox.is_active).where(Mailbox.id == mailbox_id)).scalar_one())
+
     def reserve_fn(job: SendJob) -> int:
         return _reserve_fn(session, job.message_id, job.mailbox_id, job.daily_cap, datetime.now(timezone.utc))
 
@@ -259,6 +363,12 @@ def run_approved_messages(
         message = session.get(Message, job.message_id)
         message.gmail_message_id = gmail_response.get("id")
         message.gmail_thread_id = gmail_response.get("threadId")
+        # A successful real send is the clearest evidence a mailbox is
+        # currently healthy -- clear any earlier failure rather than
+        # leaving a stale error visible on /mailboxes (docs/18) forever.
+        mailbox = session.get(Mailbox, job.mailbox_id)
+        mailbox.last_send_error = None
+        mailbox.last_send_error_at = None
         session.commit()
         logger.info("sent message %s (gmail id=%s)", job.message_id, gmail_response.get("id"))
 
@@ -267,6 +377,15 @@ def run_approved_messages(
 
     def on_error(job: SendJob, exc: Exception) -> None:
         logger.error("message %s failed: %s", job.message_id, exc)
+        # dry_run's send_fn is faked and never actually raises -- an error
+        # here in dry_run mode would be a reserve_fn oddity, not a real
+        # signal about the mailbox's real-world health, so only persist
+        # it for a real send attempt (mirrors on_sent's own dry_run gate).
+        if not dry_run:
+            mailbox = session.get(Mailbox, job.mailbox_id)
+            mailbox.last_send_error = str(exc)
+            mailbox.last_send_error_at = datetime.now(timezone.utc)
+            session.commit()
 
     return run_orchestration_loop(
         jobs,
@@ -277,4 +396,6 @@ def run_approved_messages(
         on_sent=on_sent,
         on_blocked=on_blocked,
         on_error=on_error,
+        token_health_fn=token_health_fn,
+        mailbox_active_fn=mailbox_active_fn,
     )

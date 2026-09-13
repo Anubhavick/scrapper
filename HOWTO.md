@@ -46,6 +46,12 @@ uv run alembic upgrade head    # creates all tables
 uv run pytest                  # should be all green before continuing
 ```
 
+Also set `WEB_UI_USERNAME`/`WEB_UI_PASSWORD` in `.env` to whatever login
+you want the team to use (docs/17) — pick your own values, not
+`.env.example`'s blanks. The web UI won't serve any page without both
+set; `scripts/dev.sh up` checks this up front and fails clearly if
+either is missing, before it even starts Docker.
+
 If `uv sync` times out downloading Python or packages, retry with
 `UV_HTTP_TIMEOUT=240 uv sync` — this environment's network has a slow
 ramp-up on large transfers, it's not actually stuck.

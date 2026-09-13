@@ -14,11 +14,14 @@ a real approved message to a real Austin dentist practice, real
 `gmail_message_id` recorded — see ROADMAP.md's status section). Steps 3,
 5, and 6 have been verified against real external services, not just
 mocks — see the Verification note in each of docs/03, docs/06, docs/07,
-docs/12, docs/13, and docs/14. Step 7 (bounce/reply monitoring) is
-untouched, though a manual suppression-list UI exists now (docs/14) as
-the stopgap until it does. Step 8 (FastAPI + review UI) is done in
-substance: lead-review, run history, scan-builder, campaigns +
-message-approval, and suppressions UIs all exist.
+docs/12, docs/13, docs/14, docs/15, docs/16, docs/17, docs/18, and docs/19. Step 7
+(bounce/reply monitoring) is untouched and deliberately deferred
+(2026-09-13, see ROADMAP.md), though a manual suppression-list UI exists
+now (docs/14) as the stopgap until it does. Step 8 (FastAPI + review UI)
+is done in substance: lead-review, run history, scan-builder, campaigns +
+message-approval, suppressions, and mailbox-health UIs all exist, and the
+whole thing now sits behind HTTP Basic Auth (docs/17) instead of being
+open to anyone who can reach it.
 
 - **Real, verified end-to-end:** `scripts/run_pipeline.py` against
   `targets/dentists-austin-tx.yaml` reaches live Overpass/Nominatim and
@@ -121,7 +124,16 @@ message-approval, and suppressions UIs all exist.
   `reason` attribute (`"suppressed"` | `"cap"`) so a caller can tell a
   per-message block from a per-mailbox one without parsing text.
   Verified in dry-run mode against real Postgres (docs/12); never yet
-  run `--live`.
+  run `--live`. **docs/16**: `run_orchestration_loop()` gained an
+  optional `token_health_fn(mailbox_id)`, called once per mailbox before
+  that mailbox's queue starts; `db/orchestration.py` implements it with
+  `send/oauth.py`'s `validate_token_health()`, cached per mailbox the
+  same way its per-mailbox access-token refresh already is. An unhealthy
+  mailbox has every one of its jobs blocked immediately
+  (`reason="token"`) instead of failing per message after each one's own
+  90-600s sleep. Verified against real Postgres and a real Google
+  `invalid_grant` rejection using a disposable mailbox with a garbage
+  refresh token.
 - `src/leadgen/queue.py` + `src/leadgen/jobs.py` + `api/campaigns.py`'s
   Send section (docs/13) — sending from the campaigns UI instead of a
   terminal. `queue.py`'s `get_queue()` is an RQ `Queue` bound to
@@ -155,6 +167,27 @@ message-approval, and suppressions UIs all exist.
   Verified against real Postgres + Redis with `live=False` (RQ `--burst`
   worker, including the real 90-600s sleep running uninterrupted); not
   yet clicked through in an actual browser.
+- `src/leadgen/api/auth.py` (docs/17) — `require_auth`, an HTTP Basic
+  Auth FastAPI dependency checking one shared `WEB_UI_USERNAME`/
+  `WEB_UI_PASSWORD` credential (env, plaintext like the other secrets),
+  `secrets.compare_digest` for both fields. Wired at `api/review.py`'s
+  `FastAPI(dependencies=[Depends(require_auth)])`, so it covers every
+  route on the shared app in one place, not per-router. One shared
+  credential, not per-user accounts, on purpose (docs/17) — per-user
+  identity already lives elsewhere in this system (typing a name to
+  approve a message, docs/11) and has nothing to do with who's logged
+  into the browser. **A real bug caught only by hitting the actual
+  running server:** the first version never called `load_dotenv()`
+  before reading the env vars, unlike every other module that reads a
+  required env var (`db/session.py`, `queue.py`, `jobs.py`) — `uv run`
+  does not auto-load `.env`, so a request to a page that touches no
+  database (nothing else had loaded `.env` into that process yet) 500'd
+  even with correct credentials and a fully populated `.env`. Fixed by
+  adding the same lazy `load_dotenv()` call `db/session.py`'s
+  `get_engine()` makes. `scripts/dev.sh` now also refuses to start if
+  `WEB_UI_USERNAME`/`WEB_UI_PASSWORD` aren't set in `.env` — without
+  that check, its own readiness probe (`curl`, which doesn't fail on a
+  non-2xx response) would print "Ready" while every page 500s.
 - `src/leadgen/api/suppressions.py` (docs/14) — `/suppressions`: list +
   create-only add form for `suppressions`, the manual lever for a reply
   asking to stop contact before step 7's automatic bounce/reply
@@ -171,12 +204,88 @@ message-approval, and suppressions UIs all exist.
   emptiness check. Verified against real Postgres via direct HTTP
   requests: add, normalise, duplicate-reject, malformed-input-reject,
   all confirmed live.
+- `src/leadgen/api/mailboxes.py` (docs/18) — `/mailboxes`, read-only:
+  per-mailbox live token-health (a real, uncached call to Google's token
+  endpoint on every page load — `send/oauth.py`'s
+  `validate_token_health()`, already built for docs/16's preflight
+  check, just newly surfaced here), sent-today vs. `daily_cap`, and the
+  last real send error (if any). `Mailbox` gained
+  `last_send_error`/`last_send_error_at` (nullable, point-in-time —
+  **not** a history log or counter needing a reset job, the exact thing
+  this file's schema-decisions section already warns against for this
+  table); `db/orchestration.py`'s `on_sent`/`on_error` write them,
+  gated on `not dry_run` since a faked Gmail call can't say anything
+  real about mailbox health. This is a deliberately scoped-down answer
+  to "mailbox reputation visibility" — a real spam/deliverability signal
+  needs the same restricted-scope/CASA path step 7 is already deferred
+  on (or Postmaster Tools, which needs a verified domain, not personal
+  Gmail accounts); what's surfaced here is only what's actually knowable
+  today. Verified against the real running server, including a
+  disposable mailbox with a genuinely dead refresh token rendering
+  correctly; the `on_sent`/`on_error` column-writing itself was **not**
+  exercised via a real `--live` send (would require an actual send —
+  this session does not trigger that on its own initiative) — see
+  docs/18 for exactly what was and wasn't proven.
+- **docs/19** — five smaller ROADMAP.md items in one batch:
+  - `api/targets.py` gained `GET`/`POST /targets/{name}/edit`, sharing
+    `create_target`'s exact validation via a new `_validate_profile()`
+    helper. Name is fixed (not renameable via this form). Saving
+    rewrites the whole file via the same `yaml.safe_dump()` create
+    already uses — **no comment-preserving round-trip**, a named
+    trade-off (the edit form shows a standing warning), not an oversight.
+  - `api/nav.py` gained a shared `pagination_bar()` (`PAGE_SIZE = 25`),
+    used by `/runs`, `/targets`, `/campaigns`. **A real bug caught while
+    testing it:** `page_size`'s default parameter was bound to
+    `PAGE_SIZE` at nav.py's *import* time, so monkeypatching `PAGE_SIZE`
+    in a test had no effect unless every call site passed
+    `page_size=PAGE_SIZE` explicitly (read at call time from its own
+    module) instead of relying on the default — an ordinary Python
+    default-argument-evaluated-once gotcha, easy to miss.
+  - `api/campaigns.py` gained bulk-approve — "Approve all queued (N)"
+    once 2+ messages are queued, gated on typing back `"approve all
+    N"` (N recomputed server-side at submit time, never trusted from
+    the page's last render). Deliberately not a JS `confirm()` — this
+    codebase has zero client-side JavaScript anywhere and stays that
+    way. Does not relax the "no send without approving the exact
+    rendered text" hard rule: every queued message's full text is
+    already rendered directly on the same page before this control
+    exists at all.
+  - `db/orchestration.py` gained `_reassign_if_mailbox_inactive()` and
+    `build_send_jobs(reassign=...)`: a message stuck on a since-
+    deactivated mailbox is reassigned to the least-loaded active
+    mailbox in the *same campaign's* sender pool and the change is
+    persisted immediately. `reassign` defaults to `False` specifically
+    so `preview_approved_messages()` (which never opts in) keeps its
+    documented, tested zero-write guarantee (docs/12) — only
+    `run_approved_messages()` (the real-run path) passes `reassign=True`.
+  - `send/orchestrator.py`'s `run_orchestration_loop()` gained
+    `mailbox_active_fn`, checked once per mailbox at the same point as
+    (and before) docs/16's `token_health_fn` — an inactive mailbox
+    blocks its whole queue the same way a dead token does. Implemented
+    in `db/orchestration.py` as a plain `SELECT is_active FROM
+    mailboxes WHERE id = ...`, not `session.get(Mailbox, ...)` — the
+    latter would return the same identity-mapped object already loaded
+    once at the top of the run, whose value could be stale by the time
+    a later mailbox's turn comes up in a long loop. Confirmed directly
+    (not just by isolation-level documentation) that a fresh
+    column-select inside an already-open session sees a different
+    session's concurrent commit immediately.
+  All five verified against real Postgres/the real running server with
+  disposable data, cleaned up after — see docs/19's Verification section.
 - **Still not built, on purpose:** the scan-builder page doesn't trigger a
   scan (real Overpass + per-business HTTP calls can take minutes —
   running that synchronously in a request handler is a browser-timeout
   footgun); bounce/reply monitoring (step 7, needs restricted
-  `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched; the
-  orchestration script has no preflight token-health check yet (docs/12).
+  `gmail.readonly`/`gmail.modify` scopes + CASA) is untouched and
+  deliberately deferred (2026-09-13 — a real CASA review is a paid,
+  multi-week third-party assessment for production apps serving
+  external users; this internal tool can very likely avoid it entirely
+  by staying in the OAuth consent screen's Testing mode with each
+  mailbox added as a test user, at the cost of 7-day refresh-token
+  expiry — re-evaluate that path before assuming CASA is required when
+  step 7 is picked up). The orchestration loop's preflight
+  token-health check (ROADMAP.md item 4) is now built — see
+  `send/orchestrator.py` below and docs/16.
 - `src/leadgen/db/models.py` — full SQLAlchemy schema, migrated.
 - `src/leadgen/util/domains.py` — `normalise_domain()`, tested.
 - `src/leadgen/config/{models,loader}.py` — Pydantic schemas + YAML
@@ -193,12 +302,20 @@ message-approval, and suppressions UIs all exist.
   `page_weight_mb`) only count as a real problem when a profile opts in
   via `qualification.stale_content_before_year` /
   `qualification.max_page_weight_mb` — a profile that doesn't set these
-  gets the old truthy-counts-as-matched behaviour unchanged. **Known
-  remaining issue:** `last_content_year` itself (in `signals.py`, not
-  `qualify.py`) is computed by regexing the *entire page text* for the
-  largest 4-digit year found — it reliably picks up a "© 2026" footer as
-  "last content," which is noise, not staleness. Not yet fixed; see
-  docs/07.
+  gets the old truthy-counts-as-matched behaviour unchanged.
+  `last_content_year` (in `signals.py`, not `qualify.py`) used to be
+  computed by regexing the *entire page text* for the largest 4-digit
+  year found, which reliably picked up a "© 2026" footer as "last
+  content" — fixed in docs/15: a year immediately after a copyright
+  marker (`©`/`(c)`/"copyright") is now excluded before taking the max,
+  so a copyright-only page reports `None` instead of a fabricated
+  "fresh" signal. Verified against real re-crawled sites (docs/15).
+  **Known remaining gap, narrower and separate:** a page whose only
+  other year mentions come from embedded structured data (e.g. JSON-LD
+  review `datePublished` values) still counts those — arguably correct
+  (the page's reviews really are that recent), but worth knowing if it
+  ever looks wrong on a specific site; see docs/15's smile360atx.com
+  example.
 - `src/leadgen/pipeline.py` — `run_target_profile()` / `export_csv()`:
   the actual discover→filter→crawl→qualify→CSV wiring, now also emitting
   a `crawl_status` column (`ok`/`partial`/`unreachable`/`no_website`,
