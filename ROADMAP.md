@@ -142,7 +142,10 @@ docs/09's and docs/11's `DetachedInstanceError` bugs were caught.
 7. **Google Places as a fallback discover source** — designed for in the
    schema (`businesses.source_raw_expires_at`, the 30-day Places ToS
    note), never implemented. Only worth it if Overpass coverage proves
-   thin for some vertical/city.
+   thin for some vertical/city. **That condition has now been met** —
+   see item 13: the aviation-training vertical is effectively absent
+   from OSM, so this or a `csv` source is the only way that vertical
+   ever produces leads.
 8. Smaller, lower-urgency items:
    - ~~Target profiles are create-only — no edit-in-place, only
      Duplicate.~~ **Done (docs/19).** `GET`/`POST /targets/{name}/edit`,
@@ -222,6 +225,29 @@ docs/09's and docs/11's `DetachedInstanceError` bugs were caught.
     Docker unreachable. Runs automatically as part of item 11's CI job
     (GitHub's `ubuntu-latest` runners have Docker available) — not yet
     confirmed by an actual triggered run, same caveat as docs/21.
+
+13. **A `csv` discover source — the only route into verticals OSM
+    doesn't map.** `config/models.py`'s `KNOWN_SOURCES` and
+    `SourceConfig.primary` have accepted `"csv"` since step 2, but
+    `discover/` only implements Overpass, so a profile declaring it
+    would fail at runtime against a value the schema says is legal.
+    This stopped being theoretical on 2026-09-18, when the
+    aviation-training vertical was set up (`flight_school` in
+    `config/business_types.yaml`, `targets/aviation-academies-india.yaml`,
+    `targets/flight-schools-usa.yaml`): measured against real Overpass,
+    `amenity=flight_school` + `club=aviation` return **369 objects in
+    the entire planet file** (241 with a `website` tag), of which
+    **111 are in the USA (79 surviving `must_have_website`) and 0 are
+    in India**. The India profile discovers literally nothing and
+    cannot be fixed by changing its location, radius, or tags — OSM has
+    no data to find. Since the goal there is a ~500-lead Indian
+    academy list, a `csv` source (name + website URL per row, then the
+    existing crawl → email-extract → qualify → compose chain unchanged,
+    so PROJECT.md's no-guessed-emails rule still holds — addresses
+    still come only off the business's own site) is the smallest
+    change that unblocks it, and is reusable for every future vertical
+    OSM ignores. Worth doing before item 7: no API key, no Places
+    30-day-retention purge job, no per-call cost.
 
 ## Explicitly deferred, not forgotten
 

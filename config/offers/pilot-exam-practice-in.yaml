@@ -1,0 +1,11 @@
+id: pilot-exam-practice-in
+subject_templates:
+  - "{business_name} — DGCA/RTR practice for your students?"
+  - "quick question about {business_name}'s ground-school students"
+body_template: templates/pilot_exam_practice_in.txt
+# Must stay a subset of compose/render.py's SIGNAL_LINES: last_content_year
+# and page_weight_mb are deliberately absent there, so listing either here
+# would let a lead pass qualification and then raise in render_message().
+# Order matters — pick_generated_line() takes the first truthy one.
+relevant_signals: [no_online_booking, no_contact_form, has_whatsapp_link, no_mobile_viewport]
+cta: "Worth a 10-minute call this week?"

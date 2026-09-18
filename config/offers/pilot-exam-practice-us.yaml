@@ -1,0 +1,7 @@
+id: pilot-exam-practice-us
+subject_templates:
+  - "{business_name} — written-test practice for your students?"
+  - "quick question about {business_name}'s ground school"
+body_template: templates/pilot_exam_practice_us.txt
+relevant_signals: [no_online_booking, no_contact_form, has_whatsapp_link, no_mobile_viewport]
+cta: "Worth a 10-minute call this week?"

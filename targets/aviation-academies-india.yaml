@@ -1,0 +1,68 @@
+name: aviation-academies-india
+enabled: true
+
+# DPDP, per PROJECT.md's legal-posture table (India business, India leads).
+legal_region: india
+
+business_type: flight_school
+
+# NOTE ON YIELD: with source.primary = overpass this profile discovers
+# ZERO businesses today — OSM maps no flight schools in India at all
+# (verified 2026-09-18: `amenity=flight_school` + `club=aviation` inside
+# the India admin area returns 0 objects; 369 worldwide). This profile is
+# the correct target shape and the right offer wiring, waiting on a
+# discovery source that can actually see Indian academies — the `csv`
+# source (config/models.py already accepts it; discover/ doesn't
+# implement it) fed from DGCA's published FTO list plus the ground-school
+# directories. Do not read a 0-row run of this profile as a bug in the
+# pipeline.
+location:
+  mode: admin_area
+  center: "India"
+
+source:
+  primary: overpass
+  max_results: 500
+
+filters:
+  must_have_website: true
+  must_have_phone: false
+  exclude_domains:
+    - justdial.com
+    - indiamart.com
+    - facebook.com
+    - shiksha.com
+    - collegedunia.com
+  # Military/cadet flying, not a business that buys a student practice
+  # portal.
+  exclude_name_patterns:
+    - '(?i)air ?force'
+    - '(?i)\bIAF\b'
+    - '(?i)\bNCC\b'
+  min_name_length: 3
+
+enrichment:
+  crawl_pages: [/, /contact, /about, /courses, /admission, /admissions]
+  max_pages: 8
+  signals:
+    - no_https
+    - no_mobile_viewport
+    - no_contact_form
+    - no_online_booking
+    - site_platform
+    - last_content_year
+    - page_weight_mb
+    - has_whatsapp_link
+
+qualification:
+  require_email: true
+  # Kept identical to the offer's relevant_signals: a lead that passes
+  # here on a signal the offer can't speak to would raise in
+  # render_message() at compose time instead of being filtered out now.
+  require_any_signal: [no_online_booking, no_contact_form, has_whatsapp_link, no_mobile_viewport]
+  min_signal_count: 1
+
+outreach:
+  offer_id: pilot-exam-practice-in
+  sender_pool: [sales1, sales2]
+  daily_cap_per_mailbox: 40

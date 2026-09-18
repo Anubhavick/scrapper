@@ -19,3 +19,26 @@ plumber:
     - shop=trade
   places_types: [plumber]
   keywords: [plumbing, plumber, drain repair]
+
+# Aviation training.
+#
+# Verified against Overpass on 2026-09-18, and the numbers are the point:
+# these two tags return 369 objects in the ENTIRE planet file (241 with a
+# website tag), 113 of them in the USA and **zero in India**. OSM simply
+# does not map this vertical. This block is the correct tag set and the
+# right place for it, but it is not a route to a 500-lead Indian list —
+# that needs the `csv` source (already a legal value in
+# config/models.py's KNOWN_SOURCES, not yet implemented) fed from
+# DGCA's published FTO list and the ground-school directories.
+flight_school:
+  osm:
+    - amenity=flight_school
+    - club=aviation
+  places_types: [school]
+  keywords:
+    - flight school
+    - flying club
+    - flight training
+    - pilot training
+    - aviation academy
+    - ground school

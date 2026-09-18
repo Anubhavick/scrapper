@@ -1,0 +1,64 @@
+name: flight-schools-usa
+enabled: true
+
+# CAN-SPAM, per PROJECT.md's legal-posture table. Note that `us` and
+# `india` are the only two postures this codebase can actually send
+# under: config/models.py's LegalRegion has no `canada`/`australia`
+# value, and db/orchestration.py hard-refuses every `eu_uk` profile
+# (docs/20), so EU/UK flight schools cannot be emailed from here at all.
+legal_region: us
+
+business_type: flight_school
+
+# This is the only aviation profile that discovers anything from OSM
+# today: 113 `amenity=flight_school`/`club=aviation` objects inside the
+# US admin area (verified 2026-09-18), against 0 in India. Expect the
+# qualified count to land well below that after must_have_website, the
+# email requirement, and the signal check.
+location:
+  mode: admin_area
+  center: "United States"
+
+source:
+  primary: overpass
+  max_results: 500
+
+filters:
+  must_have_website: true
+  must_have_phone: false
+  exclude_domains:
+    - facebook.com
+    - wixsite.com
+    - godaddysites.com
+  # Military and government flying, not a business that buys a student
+  # practice portal.
+  exclude_name_patterns:
+    - '(?i)air ?force'
+    - '(?i)\bUSAF\b'
+    - '(?i)civil air patrol'
+  min_name_length: 3
+
+enrichment:
+  crawl_pages: [/, /contact, /about, /courses, /training, /programs]
+  max_pages: 8
+  signals:
+    - no_https
+    - no_mobile_viewport
+    - no_contact_form
+    - no_online_booking
+    - site_platform
+    - last_content_year
+    - page_weight_mb
+    - has_whatsapp_link
+
+qualification:
+  require_email: true
+  # Kept identical to the offer's relevant_signals — see the same note in
+  # aviation-academies-india.yaml.
+  require_any_signal: [no_online_booking, no_contact_form, has_whatsapp_link, no_mobile_viewport]
+  min_signal_count: 1
+
+outreach:
+  offer_id: pilot-exam-practice-us
+  sender_pool: [sales1, sales2]
+  daily_cap_per_mailbox: 40

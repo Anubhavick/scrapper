@@ -1,0 +1,11 @@
+Hi,
+
+{generated_line} for {business_name} — so a prospective student has no way to start anything with you online.
+
+We run Pilot Sim Portal, a browser-based practice portal for flight students: written-test question practice, oral-exam drills, and radio-phraseology work they can do between lessons, with a progress dashboard per student.
+
+We're offering it to a handful of schools as a branded portal for their own students. I'd rather set up a free trial for one class and let you judge it on whether your students actually use it than make claims about checkride results.
+
+{cta}
+
+Thanks,

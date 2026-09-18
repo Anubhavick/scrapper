@@ -43,7 +43,10 @@ def test_load_target_profiles_real_dir() -> None:
     business_types = load_business_types(BUSINESS_TYPES_PATH)
     offers = load_offers(OFFERS_DIR)
     profiles = load_target_profiles(TARGETS_DIR, business_types, offers)
-    assert len(profiles) == 2
+    # Derived from the directory rather than hardcoded: this test exists to
+    # prove every profile the repo actually ships still loads, so adding a
+    # real target profile shouldn't fail it.
+    assert len(profiles) == len(list(TARGETS_DIR.glob("*.yaml")))
     profile = next(p for p in profiles if p.name == "dentists-gurugram")
     assert profile.location.mode == "radius"
     assert profile.location.radius_km == 15

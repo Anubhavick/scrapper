@@ -1,0 +1,11 @@
+Hi,
+
+{generated_line} for {business_name} — so a student comparing academies has no way to start anything with you online.
+
+We run Pilot Sim Portal, a browser-based practice portal for pilot students: DGCA CPL/ATPL paper practice, RTR(A) radio-telephony drills, and ICAO English proficiency prep, with a progress dashboard per student.
+
+We're offering it to a handful of academies as a branded portal for your own batches. I'd rather set up a free trial for one batch and let you judge it on whether your students actually use it than make claims about pass rates.
+
+{cta}
+
+Thanks,
